@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Word List — Cat Translator</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=DM+Mono:ital,wght@0,300;0,400;0,500;1,300;1,400&family=Playfair+Display:ital@0;1&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+
+  <header>
+    <div class="logo">Cat <span>Translator</span></div>
+    <div class="tagline">English ↔ Cat · English ↔ Stormy</div>
+    <nav class="site-nav">
+      <a href="index.html" class="nav-link">Translate</a>
+      <a href="words.html" class="nav-link active">Word List</a>
+      <a href="about.html" class="nav-link">About</a>
+    </nav>
+  </header>
+
+  <div class="page-content">
+
+    <h2>Word List</h2>
+    <p>
+      All words in the translation dictionary. Cat words are shared between Cat and Stormy languages —
+      in Stormy, all vowels are stretched by four characters.
+      Stormy Special words appear only in Stormy mode and are kept completely separate.
+    </p>
+
+    <!-- Color key -->
+    <div style="display:flex;flex-wrap:wrap;gap:1.2rem;margin:1.2rem 0 2rem;font-size:0.72rem;color:var(--muted);">
+      <span><span class="color-swatch" style="background:var(--accent)"></span>Cat word</span>
+      <span><span class="color-swatch" style="background:var(--stormy)"></span>Stormy (extended)</span>
+      <span><span class="color-swatch" style="background:var(--curse)"></span>Curse — censored</span>
+      <span><span class="color-swatch" style="background:var(--intense)"></span>Intense emotion</span>
+      <span><span class="color-swatch" style="background:var(--accent2)"></span>Stormy-only vocab</span>
+    </div>
+
+    <hr class="section-divider" style="margin-top:0" />
+
+    <!-- ── CAT DICTIONARY TABLE ── -->
+    <h3>Cat Dictionary</h3>
+    <p style="font-size:0.75rem;color:var(--muted);margin-bottom:1rem;">
+      These words are used in both Cat and Stormy language. In Stormy, the Cat sound is extended with extra vowels.
+    </p>
+
+    <table class="word-table" id="cat-table">
+      <thead>
+        <tr>
+          <th>English</th>
+          <th>Cat Sound</th>
+          <th>Stormy Sound</th>
+          <th>Tone</th>
+        </tr>
+      </thead>
+      <tbody id="cat-tbody">
+        <!-- Filled by JS -->
+      </tbody>
+    </table>
+
+    <hr class="section-divider" />
+
+    <!-- ── STORMY SPECIAL TABLE ── -->
+    <h3>Stormy Special Words</h3>
+    <p style="font-size:0.75rem;color:var(--muted);margin-bottom:1rem;">
+      Exclusive to Stormy mode. These words have no Cat equivalent and always translate fully regardless of the 50/50 rule.
+      Curse words are censored.
+    </p>
+
+    <table class="word-table" id="stormy-table">
+      <thead>
+        <tr>
+          <th>English</th>
+          <th>Stormy Sound</th>
+          <th>Tone</th>
+          <th>Type</th>
+        </tr>
+      </thead>
+      <tbody id="stormy-tbody">
+        <!-- Filled by JS -->
+      </tbody>
+    </table>
+
+  </div>
+
+  <script src="dictionary.js"></script>
+  <script>
+    // ── Helper: extend vowels (same as translator.js) ──
+    function toStormy(catWord) {
+      return catWord.replace(/([oOaAeEiIuUrR~]{1,})/g, (match) => {
+        const ch = match[Math.floor(match.length / 2)];
+        return match + ch.repeat(4);
+      });
+    }
+
+    function censorWord(word) {
+      if (word.length <= 1) return '*';
+      return word[0] + '*'.repeat(word.length - 1);
+    }
+
+    // ── Build cat table ──
+    const catTbody = document.getElementById('cat-tbody');
+    for (const [eng, entry] of Object.entries(catDict)) {
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td class="en-word">${eng}</td>
+        <td style="color:var(--accent)">${entry.cat}</td>
+        <td style="color:var(--stormy)">${toStormy(entry.cat)}</td>
+        <td style="color:var(--muted);font-size:0.72rem">${entry.tone}</td>
+      `;
+      catTbody.appendChild(tr);
+    }
+
+    // ── Build stormy special table ──
+    const stormyTbody = document.getElementById('stormy-tbody');
+
+    const labelMeta = {
+      curse:         { color: 'var(--curse)',   text: 'curse' },
+      intense:       { color: 'var(--intense)', text: 'intense' },
+      'stormy-vocab':{ color: 'var(--accent2)', text: 'vocab' },
+    };
+
+    for (const [eng, entry] of Object.entries(stormySpecial)) {
+      const isCurse = entry.label === 'curse';
+      const displayEng = isCurse ? censorWord(eng) : eng;
+      const meta = labelMeta[entry.label] || { color: 'var(--stormy)', text: entry.label };
+
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td class="en-word">${displayEng}</td>
+        <td style="color:${meta.color}">${entry.stormy}</td>
+        <td style="color:var(--muted);font-size:0.72rem">${entry.tone}</td>
+        <td>
+          <span style="
+            font-size:0.62rem;
+            color:${meta.color};
+            letter-spacing:0.06em;
+            text-transform:uppercase;
+          ">${meta.text}</span>
+        </td>
+      `;
+      stormyTbody.appendChild(tr);
+    }
+  </script>
+
+
+  <footer class="site-footer">made by <a href="https://github.com/mrdkmkl" target="_blank">@mrdkmkl</a></footer>
+</body>
+</html>

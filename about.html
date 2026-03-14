@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>About — Cat Translator</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=DM+Mono:ital,wght@0,300;0,400;0,500;1,300;1,400&family=Playfair+Display:ital@0;1&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="styles.css" />
+  <style>
+    /* ── Stormy profile section ── */
+    .stormy-profile {
+      display: flex;
+      gap: 2rem;
+      align-items: flex-start;
+      margin: 0 0 2rem;
+      padding: 1.5rem;
+      border: 1px solid var(--border);
+      border-radius: 3px;
+      background: var(--surface);
+    }
+
+    .stormy-photo {
+      width: 160px;
+      height: 160px;
+      flex-shrink: 0;
+      border: 1px solid var(--border);
+      border-radius: 3px;
+      object-fit: cover;
+      background: var(--tag-bg);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      overflow: hidden;
+    }
+
+    .stormy-photo img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      display: block;
+    }
+
+    .stormy-photo-placeholder {
+      font-size: 0.62rem;
+      color: var(--border);
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      text-align: center;
+      padding: 0.5rem;
+      line-height: 1.6;
+    }
+
+    .stormy-bio {
+      flex: 1;
+      min-width: 0;
+    }
+
+    .stormy-bio h2 {
+      margin-bottom: 0.5rem;
+    }
+
+    .stormy-bio .bio-meta {
+      font-size: 0.68rem;
+      color: var(--muted);
+      letter-spacing: 0.06em;
+      margin-bottom: 0.9rem;
+    }
+
+    .bio-meta span {
+      margin-right: 1.2rem;
+    }
+
+    .blank {
+      display: inline-block;
+      min-width: 120px;
+      border-bottom: 1px solid var(--border);
+      color: var(--border);
+      font-style: italic;
+      font-size: 0.8rem;
+      vertical-align: bottom;
+    }
+
+    .blank-sm { min-width: 70px; }
+    .blank-lg { min-width: 200px; }
+
+    @media (max-width: 520px) {
+      .stormy-profile { flex-direction: column; }
+      .stormy-photo   { width: 100%; height: 200px; }
+    }
+  </style>
+</head>
+<body>
+
+  <header>
+    <div class="logo">Cat <span>Translator</span></div>
+    <div class="tagline">English ↔ Cat · English ↔ Stormy</div>
+    <nav class="site-nav">
+      <a href="index.html" class="nav-link">Translate</a>
+      <a href="words.html" class="nav-link">Word List</a>
+      <a href="about.html" class="nav-link active">About</a>
+    </nav>
+  </header>
+
+  <div class="page-content">
+
+    <!-- ── STORMY PROFILE ── -->
+    <div class="stormy-profile">
+
+      <!-- Replace the src below with the path to Stormy's photo -->
+      <div class="stormy-photo">
+        <img src="stormy.jpeg" alt="Stormy" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'" />
+        <div class="stormy-photo-placeholder" style="display:none;flex-direction:column;align-items:center;justify-content:center;width:100%;height:100%;">
+          📷<br/>add stormy.jpg
+        </div>
+      </div>
+
+      <div class="stormy-bio">
+        <h2>Meet <span style="color:var(--stormy);font-style:italic">Stormy</span></h2>
+<ul style="padding-left: 1.2rem; line-height: 1.9;">
+  <li>Breed: Long Haired Dilute Tortoiseshell</li>
+  <li>Age: 4 years old</li>
+  <li>Education: PHD in Science</li>
+  <li>FAVORITE THING: Going outside & getting pets</li>
+
+</ul>
+
+      
+      </div>
+
+    </div>
+
+    <hr class="section-divider" />
+
+    <!-- ── ABOUT THE TRANSLATOR ── -->
+    <h2>About Cat Translator</h2>
+
+    <p>
+      Cat Translator converts English into two distinct feline languages: <strong>Cat</strong> and <strong>Stormy</strong>.
+      Each word in the dictionary maps to a specific cat sound. Numbers, digits, and color names always pass through unchanged.
+    </p>
+
+    <hr class="section-divider" />
+
+    <h3>Cat Language</h3>
+    <p>
+      The standard cat dialect. Every known English word maps to a unique cat sound — meows, trills, hisses, chirps, purrs, and more.
+    </p>
+    <p>
+      There's a catch: each word has a <strong>50/50 chance</strong> of simply becoming "Meow" instead of its real translation.
+      Cats don't always feel like cooperating.
+    </p>
+
+    <hr class="section-divider" />
+
+    <h3>Stormy Language</h3>
+    <p>
+      Stormy is an extended form of Cat. Every vowel cluster in a cat word gets stretched out by four extra characters,
+      turning "Meow" into "Meoooooow" and "Purrrr" into "Purrrrrrrrrr".
+    </p>
+    <p>
+      Stormy also has its own exclusive vocabulary — words that exist only in Stormy and have no Cat equivalent.
+      These include intense emotional states, curse words (censored), and Stormy-only concepts like <em>zoomies</em>, <em>chaos</em>, and <em>betrayal</em>.
+      Stormy special words always translate fully — the 50/50 rule does not apply to them.
+    </p>
+
+    <hr class="section-divider" />
+
+    <h3>Color Coding</h3>
+    <p>
+      Output words are color-coded — no labels, just color:
+    </p>
+    <p style="line-height:2.2">
+      <span class="color-swatch" style="background:var(--accent)"></span><span style="color:var(--accent)">Tangerine</span> — standard cat word<br>
+      <span class="color-swatch" style="background:var(--stormy)"></span><span style="color:var(--stormy)">Purple</span> — stormy extended word<br>
+      <span class="color-swatch" style="background:var(--curse)"></span><span style="color:var(--curse)">Red</span> — curse word (always censored)<br>
+      <span class="color-swatch" style="background:var(--intense)"></span><span style="color:var(--intense)">Amber</span> — intense emotion (stormy only)<br>
+      <span class="color-swatch" style="background:var(--accent2)"></span><span style="color:var(--accent2)">Green</span> — stormy-only vocabulary<br>
+      <span class="color-swatch" style="background:var(--muted)"></span><span style="color:var(--muted)">Grey</span> — low confidence / unknown word<br>
+      <span class="color-swatch" style="background:var(--text)"></span><span style="color:var(--text)">Black</span> — number or color name (passed through)
+    </p>
+
+    <hr class="section-divider" />
+
+    <h3>Word Limit</h3>
+    <p>
+      English input is capped at <strong>100 words</strong> when translating into Cat or Stormy.
+      The counter in the input pane tracks your usage. No limit applies when going Cat or Stormy → English.
+    </p>
+
+    <hr class="section-divider" />
+
+    <h3>Reverse Translation</h3>
+    <p>
+      Type Cat or Stormy sounds into the left pane to get English back out.
+      Use the swap button (⇄) to flip sides automatically.
+    </p>
+
+  </div>
+    <footer class="site-footer">made by <a href="https://github.com/mrdkmkl" target="_blank">@mrdkmkl</a></footer>
+
+</body>
+</html>

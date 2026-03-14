@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Cat Translator</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=DM+Mono:ital,wght@0,300;0,400;0,500;1,300;1,400&family=Playfair+Display:ital@0;1&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+
+  <!-- ── Header ── -->
+  <header>
+    <div class="logo">Cat <span>Translator</span></div>
+    <div class="tagline">English ↔ Cat · English ↔ Stormy</div>
+    <nav class="site-nav">
+      <a href="index.html" class="nav-link active">Translate</a>
+      <a href="words.html" class="nav-link">Word List</a>
+      <a href="about.html" class="nav-link">About</a>
+    </nav>
+  </header>
+
+  <!-- ── Mode Bar ── -->
+  <div class="mode-bar">
+    <span class="mode-label">Mode</span>
+
+    <!-- Cat group -->
+    <button class="mode-btn cat-mode" data-mode="en-cat">English → Cat</button>
+    <button class="mode-btn cat-mode" data-mode="cat-en">Cat → English</button>
+
+    <!-- ▌ Divider between Cat and Stormy ▌ -->
+    <div class="mode-divider"></div>
+
+    <!-- Stormy group -->
+    <button class="mode-btn stormy-mode" data-mode="en-stormy">English → Stormy</button>
+    <button class="mode-btn stormy-mode" data-mode="stormy-en">Stormy → English</button>
+  </div>
+
+  <!-- ── Main Translator ── -->
+  <main>
+    <div class="translator">
+
+      <!-- Left pane (input) -->
+      <div class="pane" id="left-pane">
+        <div class="pane-header">
+          <div class="pane-lang" id="left-label"><strong>English</strong></div>
+          <div class="pane-header-right">
+            <span class="word-counter" id="word-counter" style="display:none">0 / 100</span>
+            <button class="clear-btn" id="clear-btn">clear</button>
+          </div>
+        </div>
+        <textarea
+          id="input-text"
+          placeholder="Type in English… (max 100 words)"
+          autocomplete="off"
+          spellcheck="false"
+        ></textarea>
+      </div>
+
+      <!-- Divider + swap button -->
+      <div class="pane-divider">
+        <button class="swap-btn" id="swap-btn" title="Swap sides">⇄</button>
+      </div>
+
+      <!-- Right pane (output) -->
+      <div class="pane" id="right-pane">
+        <div class="pane-header">
+          <div class="pane-lang" id="right-label"><strong>Cat</strong></div>
+          <button class="copy-btn" id="copy-btn">copy</button>
+        </div>
+        <div class="pane-output" id="output-area">
+          <span class="output-placeholder">Translation appears here…</span>
+        </div>
+      </div>
+
+    </div>
+  </main>
+
+  <!-- ── Legend ── -->
+  <div class="legend">
+    <div class="legend-item">
+      <div class="legend-dot" style="background:var(--accent)"></div>
+      <span>cat word</span>
+    </div>
+    <div class="legend-item">
+      <div class="legend-dot" style="background:var(--stormy)"></div>
+      <span>stormy word</span>
+    </div>
+    <div class="legend-item">
+      <div class="legend-dot" style="background:var(--curse)"></div>
+      <span>curse (censored)</span>
+    </div>
+    <div class="legend-item">
+      <div class="legend-dot" style="background:var(--intense)"></div>
+      <span>intense emotion</span>
+    </div>
+    <div class="legend-item">
+      <div class="legend-dot" style="background:var(--accent2)"></div>
+      <span>stormy-only vocab</span>
+    </div>
+    <div class="legend-item">
+      <div class="legend-dot" style="background:var(--muted)"></div>
+      <span>low confidence</span>
+    </div>
+  </div>
+
+  <!-- Scripts: dictionary first, then translator logic -->
+  <script src="dictionary.js"></script>
+  <script src="translator.js"></script>
+
+
+  <footer class="site-footer">made by <a href="https://www.declan.fun" target="_blank">@mrdkmkl</a></footer>
+</body>
+</html>
