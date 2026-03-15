@@ -14,23 +14,42 @@ const PLACEHOLDER_HTML = '<span class="output-placeholder">Translation appears h
 const TRANSLATING_HTML = '<span class="translating-msg">Translating\u2026</span>';
 // Error codes — keep in sync with error.html ERROR_CATALOGUE
 const ERRORS = {
-  WORKER_FAILED:  'CT-100',
-  WORKER_TIMEOUT: 'CT-101',
-  WORKER_CRASH:   'CT-102',
-  DICT_MISSING:   'CT-200',
-  TRANS_FAILED:   'CT-300',
-  INPUT_LONG:     'CT-400',
-  INPUT_EMPTY:    'CT-401',
-  LOAD_FAIL:      'CT-500',
-  UNKNOWN:        'CT-900',
+  WORKER_FAILED:   'CT-100',
+  WORKER_TIMEOUT:  'CT-101',
+  WORKER_CRASH:    'CT-102',
+  DICT_MISSING:    'CT-200',
+  TRANS_FAILED:    'CT-300',
+  INPUT_LONG:      'CT-400',
+  INPUT_EMPTY:     'CT-401',
+  WORD_TOO_LONG:   'CT-402',
+  WORD_GIBBERISH:  'CT-403',
+  TONE_INVALID:    'CT-404',
+  CLIPBOARD_FAIL:  'CT-405',
+  LOAD_FAIL:       'CT-500',
+  RANDOM_FAIL:     'CT-501',
+  SWAP_FAIL:       'CT-502',
+  UNKNOWN:         'CT-900',
 };
+
+const MAX_WORD_CHARS = 34; // single word character limit
 
 function makeErrorHTML(code, hint) {
   var labels = {
-    'CT-100':'Worker failed to start','CT-101':'Worker timed out',
-    'CT-102':'Worker crashed','CT-200':'Dictionary not loaded',
-    'CT-300':'Translation failed','CT-400':'Input too long',
-    'CT-401':'Empty input','CT-500':'Script load error','CT-900':'Unknown error',
+    'CT-100':'Worker failed to start',
+    'CT-101':'Worker timed out',
+    'CT-102':'Worker crashed',
+    'CT-200':'Dictionary not loaded',
+    'CT-300':'Translation failed',
+    'CT-400':'Input too long',
+    'CT-401':'Empty input',
+    'CT-402':'Word too long',
+    'CT-403':'Unreadable input',
+    'CT-404':'Invalid tone level',
+    'CT-405':'Clipboard error',
+    'CT-500':'Script load error',
+    'CT-501':'Random phrase failed',
+    'CT-502':'Swap failed',
+    'CT-900':'Unknown error',
   };
   var h = hint ? '<div class="error-hint">' + hint + '</div>' : '';
   return '<div class="error-notice">' +
@@ -39,6 +58,13 @@ function makeErrorHTML(code, hint) {
     '<div class="error-hint" style="margin-top:0.4rem">' +
     '<a href="error.html?code=' + code + '" style="color:var(--curse);text-decoration:underline">More info</a>' +
     '</div></div>';
+}
+
+function goErrorPage(code, context) {
+  var url = 'error.html?code=' + encodeURIComponent(code);
+  if (context) url += '&context=' + encodeURIComponent(context);
+  url += '&from=' + encodeURIComponent(window.location.pathname);
+  window.location.href = url;
 }
 
 // ── Utilities ─────────────────────────────────────────────────────────────
@@ -239,7 +265,15 @@ document.addEventListener('DOMContentLoaded', function() {
   // ── Helpers ────────────────────────────────────────────────────────────
   function getToneLevel() {
     const cfg = MODES[currentMode];
-    return cfg.group === 'stormy' ? stormyToneLevel : catToneLevel;
+    var level = cfg.group === 'stormy' ? stormyToneLevel : catToneLevel;
+    var min = 1, max = cfg.group === 'stormy' ? 5 : 3;
+    if (level < min || level > max || isNaN(level)) {
+      console.warn('[CT] Invalid tone level', level, '— resetting to default');
+      if (cfg.group === 'stormy') stormyToneLevel = 3;
+      else catToneLevel = 1;
+      level = cfg.group === 'stormy' ? 3 : 1;
+    }
+    return level;
   }
 
   function closeTonePopups() {
@@ -298,6 +332,26 @@ document.addEventListener('DOMContentLoaded', function() {
       if (confEl) confEl.innerHTML = '';
       if (outputBadgeEl) outputBadgeEl.textContent = '';
       return;
+    }
+
+    // Check for empty / whitespace-only
+    if (!text.replace(/\s/g, '')) {
+      outputEl.innerHTML = makeErrorHTML(ERRORS.INPUT_EMPTY, 'Type something first');
+      return;
+    }
+
+    // Check for individual words exceeding MAX_WORD_CHARS
+    if (MODES[currentMode].dir.startsWith('to-')) {
+      var tokens = text.split(/\s+/);
+      for (var ti = 0; ti < tokens.length; ti++) {
+        var tok = tokens[ti].replace(/[^a-zA-Z']/g, '');
+        if (tok.length > MAX_WORD_CHARS) {
+          goErrorPage(ERRORS.WORD_TOO_LONG,
+            'Word "' + tokens[ti].slice(0, 20) + (tokens[ti].length > 20 ? '...' : '') +
+            '" has ' + tok.length + ' characters (max ' + MAX_WORD_CHARS + ')');
+          return;
+        }
+      }
     }
 
     const myId     = ++latestReqId;
@@ -427,7 +481,10 @@ document.addEventListener('DOMContentLoaded', function() {
       }, COPY_CONFIRM_MS);
     };
     if (navigator.clipboard) {
-      navigator.clipboard.writeText(text).then(done).catch(done);
+      navigator.clipboard.writeText(text).then(done).catch(function(err) {
+        console.warn('[CT] Clipboard error (CT-405):', err);
+        done(); // still show "copied" — it usually still worked
+      });
     } else {
       done();
     }
@@ -437,7 +494,10 @@ document.addEventListener('DOMContentLoaded', function() {
   swapBtn.addEventListener('click', function() {
     const out    = outputEl.innerText.replace(/\s+/g, ' ').trim();
     const target = SWAP_MAP[currentMode];
-    if (!target) return;
+    if (!target) {
+      console.warn('[CT] Swap target not found (CT-502) for mode:', currentMode);
+      return;
+    }
     setMode(target);
     const skip = ['Translation appears here\u2026', 'Translating\u2026', ''];
     if (out && !skip.includes(out)) {
