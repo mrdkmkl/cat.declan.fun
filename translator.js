@@ -1,8 +1,8 @@
 // ─────────────────────────────────────────────────────
-//  translator.js — UI shell only
-//  All translation logic lives in worker.js (Web Worker)
-//  The worker runs on a background thread so the UI
-//  stays responsive and can show "Translating..."
+//  translator.js — UI shell
+//  All translation logic lives in worker.js (Web Worker).
+//  The worker runs WASM (hash.c compiled) for fast unknown
+//  word hashing, and handles all cat/stormy translation.
 // ─────────────────────────────────────────────────────
 
 const WORD_LIMIT = 100;
@@ -13,142 +13,121 @@ function countWords(text) {
 
 document.addEventListener('DOMContentLoaded', function () {
 
-  // ── Spin up the Web Worker ──────────────────────────
-  // The worker stays alive for the whole session so its
-  // session maps (unknown word round-trips) are preserved.
+  // ── Start the Web Worker ────────────────────────────
   const worker = new Worker('worker.js');
-  let pendingId = 0;
-  let debounceTimer = null;
-
-  // Map of request id → resolve function (only last matters)
+  let reqId = 0;
+  let debounce = null;
   const pending = {};
 
   worker.onmessage = function(e) {
     const { id, html } = e.data;
-    if (pending[id]) {
-      pending[id](html);
-      delete pending[id];
-    }
+    if (pending[id]) { pending[id](html); delete pending[id]; }
   };
 
-  function requestTranslation(type, text) {
+  worker.onerror = function(e) {
+    outputEl.innerHTML = '<span class="col-low">Worker error — check console</span>';
+  };
+
+  function ask(type, text) {
     return new Promise(resolve => {
-      const id = ++pendingId;
+      const id = ++reqId;
       pending[id] = resolve;
       worker.postMessage({ id, type, text });
     });
   }
 
-  // ── Mode config ─────────────────────────────────────
-  let currentMode = 'en-cat';
+  // ── Mode config ──────────────────────────────────────
+  let mode = 'en-cat';
 
-  const modeConfig = {
-    'en-cat':    { leftLang:'English', rightLabelHTML:'<strong>Cat</strong>',
-                   placeholder:'Type in English… (max 100 words)', dir:'to-cat', group:'cat', showLimit:true },
-    'en-stormy': { leftLang:'English', rightLabelHTML:'<strong>Stormy</strong><span class="stormy-label-badge">extended</span>',
-                   placeholder:'Type in English… (max 100 words)', dir:'to-stormy', group:'stormy', showLimit:true },
-    'cat-en':    { leftLang:'Cat',     rightLabelHTML:'<strong>English</strong>',
-                   placeholder:'Type Cat words…', dir:'from-cat', group:'cat', showLimit:false },
-    'stormy-en': { leftLang:'Stormy',  rightLabelHTML:'<strong>English</strong>',
-                   placeholder:'Type Stormy words…', dir:'from-stormy', group:'stormy', showLimit:false },
+  const MODES = {
+    'en-cat':    { left:'English', right:'<strong>Cat</strong>',
+                   ph:'Type in English… (max 100 words)', dir:'to-cat',      group:'cat',    limit:true  },
+    'en-stormy': { left:'English', right:'<strong>Stormy</strong><span class="stormy-label-badge">extended</span>',
+                   ph:'Type in English… (max 100 words)', dir:'to-stormy',   group:'stormy', limit:true  },
+    'cat-en':    { left:'Cat',     right:'<strong>English</strong>',
+                   ph:'Type Cat words…',                  dir:'from-cat',    group:'cat',    limit:false },
+    'stormy-en': { left:'Stormy',  right:'<strong>English</strong>',
+                   ph:'Type Stormy words…',               dir:'from-stormy', group:'stormy', limit:false },
   };
 
-  const swapPair = { 'en-cat':'cat-en','cat-en':'en-cat','en-stormy':'stormy-en','stormy-en':'en-stormy' };
+  const SWAP = { 'en-cat':'cat-en','cat-en':'en-cat','en-stormy':'stormy-en','stormy-en':'en-stormy' };
 
   // ── DOM refs ─────────────────────────────────────────
-  const inputEl    = document.getElementById('input-text');
-  const outputEl   = document.getElementById('output-area');
-  const leftLabel  = document.getElementById('left-label');
-  const rightLabel = document.getElementById('right-label');
-  const modeBtns   = document.querySelectorAll('.mode-btn');
-  const wordCounter= document.getElementById('word-counter');
+  const inputEl  = document.getElementById('input-text');
+  const outputEl = document.getElementById('output-area');
+  const leftLbl  = document.getElementById('left-label');
+  const rightLbl = document.getElementById('right-label');
+  const modeBtns = document.querySelectorAll('.mode-btn');
+  const counter  = document.getElementById('word-counter');
 
-  // ── Word counter ─────────────────────────────────────
-  function updateWordCounter() {
-    const cfg = modeConfig[currentMode];
-    if (!cfg.showLimit) { wordCounter.style.display = 'none'; return; }
-    wordCounter.style.display = 'inline';
-    const count = countWords(inputEl.value);
-    wordCounter.textContent = `${count} / ${WORD_LIMIT}`;
-    wordCounter.classList.toggle('over-limit', count > WORD_LIMIT);
+  const PLACEHOLDER = '<span class="output-placeholder">Translation appears here…</span>';
+  const TRANSLATING  = '<span class="translating-msg">Translating…</span>';
+
+  // ── Word counter ────────────────────────────────────
+  function updateCounter() {
+    const cfg = MODES[mode];
+    if (!cfg.limit) { counter.style.display='none'; return; }
+    counter.style.display = 'inline';
+    const n = countWords(inputEl.value);
+    counter.textContent = n + ' / ' + WORD_LIMIT;
+    counter.classList.toggle('over-limit', n > WORD_LIMIT);
   }
 
-  function enforceWordLimit() {
-    const cfg = modeConfig[currentMode];
-    if (!cfg.showLimit) return;
+  function enforceLimit() {
+    if (!MODES[mode].limit) return;
     const chunks = inputEl.value.trim().split(/(\s+)/);
-    let count = 0, cutIndex = inputEl.value.length, charPos = 0;
-    for (const chunk of chunks) {
-      if (chunk.replace(/[^a-zA-Z']/g,'').length > 0) {
-        count++;
-        if (count > WORD_LIMIT) { cutIndex = charPos; break; }
-      }
-      charPos += chunk.length;
+    let count=0, cut=inputEl.value.length, pos=0;
+    for (const c of chunks) {
+      if (c.replace(/[^a-zA-Z']/g,'').length>0) { count++; if (count>WORD_LIMIT) { cut=pos; break; } }
+      pos += c.length;
     }
-    if (count > WORD_LIMIT) inputEl.value = inputEl.value.slice(0, cutIndex).trimEnd();
+    if (count > WORD_LIMIT) inputEl.value = inputEl.value.slice(0, cut).trimEnd();
   }
 
   // ── Set mode ─────────────────────────────────────────
-  function setMode(mode) {
-    currentMode = mode;
-    const cfg = modeConfig[mode];
-    leftLabel.innerHTML  = `<strong>${cfg.leftLang}</strong>`;
-    rightLabel.innerHTML = cfg.rightLabelHTML;
-    inputEl.placeholder  = cfg.placeholder;
+  function setMode(m) {
+    mode = m;
+    const cfg = MODES[m];
+    leftLbl.innerHTML  = '<strong>'+cfg.left+'</strong>';
+    rightLbl.innerHTML = cfg.right;
+    inputEl.placeholder = cfg.ph;
     modeBtns.forEach(btn => {
-      const active = btn.dataset.mode === mode;
-      btn.classList.toggle('active', active);
-      btn.classList.remove('cat-mode', 'stormy-mode');
-      if (active) btn.classList.add(cfg.group === 'stormy' ? 'stormy-mode' : 'cat-mode');
+      const on = btn.dataset.mode === m;
+      btn.classList.toggle('active', on);
+      btn.classList.remove('cat-mode','stormy-mode');
+      if (on) btn.classList.add(cfg.group==='stormy' ? 'stormy-mode' : 'cat-mode');
     });
-    updateWordCounter();
+    updateCounter();
     doTranslate();
   }
 
-  // ── Translate — debounced, shows "Translating…" ──────
-  const TRANSLATING_HTML = '<span class="translating-msg">Translating…</span>';
-  const PLACEHOLDER_HTML = '<span class="output-placeholder">Translation appears here…</span>';
-  const TRANSLATING_DELAY_MS = 120; // wait this long before showing spinner text
+  // ── Translate ────────────────────────────────────────
+  let latestReq = 0;
 
   async function doTranslate() {
     const text = inputEl.value.trim();
-    if (!text) { outputEl.innerHTML = PLACEHOLDER_HTML; return; }
-
-    const { dir } = modeConfig[currentMode];
-    const myId = ++pendingId; // snapshot current request id
-
-    // Show "Translating…" only if the worker takes a moment
-    const showTimer = setTimeout(() => {
-      if (pendingId === myId) outputEl.innerHTML = TRANSLATING_HTML;
-    }, TRANSLATING_DELAY_MS);
-
-    const html = await requestTranslation(dir, text);
-
-    clearTimeout(showTimer);
-
-    // Only render if this is still the latest request
-    if (pendingId === myId) outputEl.innerHTML = html || PLACEHOLDER_HTML;
+    if (!text) { outputEl.innerHTML = PLACEHOLDER; return; }
+    const myReq = ++latestReq;
+    // Show "Translating…" only if worker takes >100ms
+    const t = setTimeout(() => { if (latestReq===myReq) outputEl.innerHTML = TRANSLATING; }, 100);
+    const html = await ask(MODES[mode].dir, text);
+    clearTimeout(t);
+    if (latestReq === myReq) outputEl.innerHTML = html || PLACEHOLDER;
   }
 
-  // Debounce so fast typing doesn't flood the worker
-  function scheduledTranslate() {
-    clearTimeout(debounceTimer);
-    debounceTimer = setTimeout(doTranslate, 80);
+  function schedule() {
+    clearTimeout(debounce);
+    debounce = setTimeout(doTranslate, 60);
   }
 
   // ── Events ────────────────────────────────────────────
-  inputEl.addEventListener('input', () => {
-    enforceWordLimit();
-    updateWordCounter();
-    scheduledTranslate();
-  });
-
-  modeBtns.forEach(btn => btn.addEventListener('click', () => setMode(btn.dataset.mode)));
+  inputEl.addEventListener('input', () => { enforceLimit(); updateCounter(); schedule(); });
+  modeBtns.forEach(b => b.addEventListener('click', () => setMode(b.dataset.mode)));
 
   document.getElementById('clear-btn').addEventListener('click', () => {
     inputEl.value = '';
-    outputEl.innerHTML = PLACEHOLDER_HTML;
-    updateWordCounter();
+    outputEl.innerHTML = PLACEHOLDER;
+    updateCounter();
     inputEl.focus();
   });
 
@@ -157,21 +136,18 @@ document.addEventListener('DOMContentLoaded', function () {
       const btn = document.getElementById('copy-btn');
       btn.textContent = 'copied!';
       btn.classList.add('copied');
-      setTimeout(() => { btn.textContent = 'copy'; btn.classList.remove('copied'); }, 1500);
+      setTimeout(() => { btn.textContent='copy'; btn.classList.remove('copied'); }, 1500);
     });
   });
 
   document.getElementById('swap-btn').addEventListener('click', () => {
-    const outText = outputEl.innerText.replace(/\s+/g,' ').trim();
-    const target = swapPair[currentMode];
-    setMode(target);
-    if (outText && outText !== 'Translation appears here…' && outText !== 'Translating…') {
-      inputEl.value = outText;
-      enforceWordLimit();
-      updateWordCounter();
-      doTranslate();
+    const out = outputEl.innerText.replace(/\s+/g,' ').trim();
+    setMode(SWAP[mode]);
+    if (out && out !== 'Translation appears here…' && out !== 'Translating…') {
+      inputEl.value = out;
+      enforceLimit(); updateCounter(); doTranslate();
     }
   });
 
   setMode('en-cat');
-}); // end DOMContentLoaded
+});
