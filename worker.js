@@ -71,6 +71,190 @@ const POOL = [
 ];
 
 (function(){ const s=new Set(POOL); if(s.size!==POOL.length) console.warn('[CT] Pool dupes:',POOL.length-s.size); })();
+// ════════════════════════════════════════════════════════════════════════
+//  §WASM  DECRYPT WASM MODULE  (compiled from decrypt.c)
+//  Exports: djb2(ptr,len,pool) and lev(a,la,b,lb)
+//  Signal analysis functions (vowel_density, phoneme_class, etc.)
+//  are implemented in JS below, exactly mirroring decrypt.c.
+// ════════════════════════════════════════════════════════════════════════
+const DECRYPT_WASM_B64 = 'AGFzbQEAAAABEAJgA39/fwF/YAR/f39/AX8DAwIAAQUDAQABBxcDBGRqYjIAAANsZXYAAQZtZW1vcnkCAAq+AgI/AQN/QYUqIQNBACEEAkADQCAEIAFPDQEgACAEai0AACEFIANBBXQgA2ogBXMhAyAEQQFqIQQMAAsLIAMgAnAL+wEBB39BgCAhCEGAISEJQQAhBQJAA0AgBSADQQFqTw0BIAVBAnQgCGogBTYCACAFQQFqIQUMAAsLQQAhBAJAA0AgBCABTw0BIAkgBEEBajYCAEEAIAUCQANAIAUgA08NASAAIARqLQAAIAIgBWotAABHIQYgBUEBakECdCAIaigCAEEBaiEHIAVBAnQgCWooAgBBAWohCiAKIAdJBEAgCiEHCyAFQQJ0IAhqKAIAIAZqIQogCiAHSQRAIAohBwsgBUEBakECdCAJaiAHNgIAIAVBAWohBQwACwsgCCEKIAkhCCAKIQkgBEEBaiEEDAALCyADQQJ0IAhqKAIACw==';
+
+let _wasmDjb2 = null, _wasmLev = null, _wasmMem = null;
+
+(function initWasm() {
+  try {
+    const bin  = Uint8Array.from(atob(DECRYPT_WASM_B64), c => c.charCodeAt(0));
+    const mod  = new WebAssembly.Module(bin);
+    const inst = new WebAssembly.Instance(mod);
+    _wasmDjb2  = inst.exports.djb2;
+    _wasmLev   = inst.exports.lev;
+    _wasmMem   = new Uint8Array(inst.exports.memory.buffer);
+  } catch(e) {
+    _wasmDjb2 = null; _wasmLev = null; // fall back to JS
+  }
+})();
+
+// Write a string to WASM memory and return [offset, length]
+function wasmWrite(s, offset) {
+  if (!_wasmMem) return [0, 0];
+  const bytes = Array.from(s.toLowerCase().replace(/[^a-z]/g,'').slice(0,63))
+    .map(c => c.charCodeAt(0));
+  _wasmMem.set(bytes, offset);
+  return [offset, bytes.length];
+}
+
+function wasmDjb2(word, poolSize) {
+  const clean = word.toLowerCase().replace(/[^a-z]/g,'');
+  if (_wasmDjb2 && _wasmMem) {
+    const [p,l] = wasmWrite(clean, 0);
+    return _wasmDjb2(p, l, poolSize);
+  }
+  // JS fallback — identical to hash.c djb2
+  let h = 5381;
+  for (let i = 0; i < clean.length; i++) h = (((h<<5)+h)^clean.charCodeAt(i))>>>0;
+  return poolSize > 0 ? h % poolSize : h;
+}
+
+function wasmLev(a, b) {
+  const ca = a.toLowerCase().replace(/[^a-z]/g,'').slice(0,63);
+  const cb = b.toLowerCase().replace(/[^a-z]/g,'').slice(0,63);
+  if (_wasmLev && _wasmMem) {
+    const [pa,la] = wasmWrite(ca, 512);
+    const [pb,lb] = wasmWrite(cb, 640);
+    return _wasmLev(pa, la, pb, lb);
+  }
+  // JS fallback — identical to hash.c lev
+  const m = ca.length, n = cb.length;
+  if (!m) return n; if (!n) return m;
+  let prev = Array.from({length:n+1},(_,i)=>i), curr = new Array(n+1);
+  for (let i = 0; i < m; i++) {
+    curr[0] = i+1;
+    for (let j = 0; j < n; j++) {
+      const c = ca[i]===cb[j]?0:1;
+      curr[j+1] = Math.min(curr[j]+1,prev[j+1]+1,prev[j]+c);
+    }
+    [prev,curr]=[curr,prev];
+  }
+  return prev[n];
+}
+
+// ════════════════════════════════════════════════════════════════════════
+//  SIGNAL ANALYSIS (JS mirror of decrypt.c functions)
+//  These implement the exact same algorithms as the C code.
+//  Used during decryption to score candidates.
+// ════════════════════════════════════════════════════════════════════════
+
+const VOWELS = new Set(['a','e','i','o','u']);
+function isVowelCh(c) { return VOWELS.has(c.toLowerCase()); }
+function isAlphaCh(c) { return /[a-zA-Z]/.test(c); }
+
+// vowel_density: vowel count * 255 / alpha count
+function vowelDensity(s) {
+  let vowels=0, alpha=0;
+  for (const c of s) { if (!isAlphaCh(c)) continue; alpha++; if (isVowelCh(c)) vowels++; }
+  return alpha ? Math.round(vowels*255/alpha) : 0;
+}
+
+// consonant_runs: length of longest consecutive consonant sequence
+function consonantRuns(s) {
+  let best=0, run=0;
+  for (const c of s) {
+    if (isAlphaCh(c) && !isVowelCh(c)) { run++; if(run>best) best=run; }
+    else { run=0; }
+  }
+  return best;
+}
+
+// repeat_score: adjacent identical char pairs * 255 / (len-1)
+function repeatScore(s) {
+  if (s.length < 2) return 0;
+  let pairs=0;
+  for (let i=0;i<s.length-1;i++) {
+    if (isAlphaCh(s[i]) && s[i].toLowerCase()===s[i+1].toLowerCase()) pairs++;
+  }
+  return Math.round(pairs*255/(s.length-1));
+}
+
+// cap_weight: uppercase chars * 255 / alpha chars
+function capWeight(s) {
+  let uppers=0, alpha=0;
+  for (const c of s) { if (!isAlphaCh(c)) continue; alpha++; if (c===c.toUpperCase()&&c!==c.toLowerCase()) uppers++; }
+  return alpha ? Math.round(uppers*255/alpha) : 0;
+}
+
+// phoneme_class: classify into 0-7 matching decrypt.c phoneme_class()
+function phonemeClass(s) {
+  const lo = s.toLowerCase().replace(/[^a-z]/g,'');
+  if (!lo) return 7;
+  // HISS
+  if (lo.startsWith('hi') || (lo.match(/s/g)||[]).length >= 3) return 3;
+  // CHIRP / TRILL / SNIFF
+  if (lo.startsWith('ch') || lo.startsWith('tr') || lo.startsWith('sn')) return 4;
+  // YOWL
+  if (lo.startsWith('y') || lo.includes('ow')) return 5;
+  // PURR
+  if (lo.startsWith('pr') || lo.startsWith('pu') || lo.startsWith('br')) return 0;
+  // MEW vs MEOW
+  if (lo.startsWith('me')) { return lo.includes('o') ? 2 : 1; }
+  // MRRPH
+  if (lo.startsWith('mr')) {
+    const vcount = [...lo].filter(c=>isVowelCh(c)).length;
+    return (vcount===0 || lo.endsWith('ph')) ? 6 : 2;
+  }
+  // NYAOW / NYOW
+  if (lo.startsWith('ny') || lo.startsWith('no')) return 2;
+  // NOM
+  if (lo.startsWith('no')) return 1;
+  return 7;
+}
+
+// signal_vector: pack all signals into 32-bit int (mirrors decrypt.c)
+function signalVector(s) {
+  const vd = vowelDensity(s);
+  const cr = Math.min(consonantRuns(s), 255);
+  const rs = repeatScore(s);
+  const cw = (capWeight(s) >> 4) & 0x0f;
+  const pc = phonemeClass(s) & 0x0f;
+  return ((vd<<24)|(cr<<16)|(rs<<8)|(cw<<4)|pc)>>>0;
+}
+
+// bigram_overlap: count shared character bigrams (mirrors decrypt.c)
+function bigramOverlap(a, b) {
+  if (a.length < 2 || b.length < 2) return 0;
+  const al = a.toLowerCase().replace(/[^a-z]/g,'');
+  const bl = b.toLowerCase().replace(/[^a-z]/g,'');
+  const bSet = new Map();
+  for (let i=0;i<bl.length-1;i++) {
+    const bg = bl[i]+bl[i+1];
+    bSet.set(bg,(bSet.get(bg)||0)+1);
+  }
+  let shared=0;
+  for (let i=0;i<al.length-1;i++) {
+    const bg = al[i]+al[i+1];
+    const cnt = bSet.get(bg)||0;
+    if (cnt>0) { shared++; bSet.set(bg,cnt-1); }
+  }
+  return shared;
+}
+
+// score_candidate: composite score 0-255 (mirrors decrypt.c score_candidate)
+function scoreCandidate(inputSv, candSv, levDist, bigramCnt, maxBigrams) {
+  const iPc = inputSv & 0x0f;
+  const cPc = candSv  & 0x0f;
+  const iCw = (inputSv>>4) & 0x0f;
+  const cCw = (candSv >>4) & 0x0f;
+  const iVd = (inputSv>>24) & 0xff;
+  const cVd = (candSv >>24) & 0xff;
+  let score = Math.max(0, 200 - levDist * 28);
+  if (maxBigrams > 0) score += Math.round(bigramCnt * 45 / maxBigrams);
+  if (iPc === cPc) score += 20;
+  const cwDiff = Math.abs(iCw - cCw);
+  if (cwDiff <= 2) score += 15; else if (cwDiff <= 4) score += 8;
+  const vdDiff = Math.abs(iVd - cVd);
+  if (vdDiff <= 32) score += 10; else if (vdDiff <= 64) score += 5;
+  return Math.min(255, Math.max(0, score));
+}
+
 
 // ════════════════════════════════════════════════════════════════════════
 //  §2  CONSTANTS
@@ -827,16 +1011,193 @@ function doTranslate(type, text, toneLevel) {
 //  §25  WORKER MESSAGE HANDLER
 // ════════════════════════════════════════════════════════════════════════
 
+// ════════════════════════════════════════════════════════════════════════
+//  §STUDY  DECRYPT STUDY ENGINE
+//  When direction is from-cat or from-stormy, the engine streams
+//  progress events back to the UI token-by-token and fragment-by-fragment
+//  so the UI can animate a "studying the letters" loading sequence.
+//
+//  Message types sent TO the worker:
+//    { id, type:'study', text, lang }   — start streaming study
+//    { id, type:'from-cat', text }      — instant translate (no animation)
+//    { id, type:'from-stormy', text }   — instant translate (no animation)
+//    { id, type:'to-cat', text, toneLevel }
+//    { id, type:'to-stormy', text, toneLevel }
+//    { id, type:'random', lang }
+//
+//  Messages sent FROM the worker during a 'study' request:
+//    { id, type:'study-start', tokenCount }       — how many tokens total
+//    { id, type:'study-token', token, tokenIdx }  — studying this token now
+//    { id, type:'study-frag',  frag, tokenIdx, fragIdx, fragCount }
+//    { id, type:'study-match', token, match, score, tokenIdx }
+//    { id, type:'study-fail',  token, tokenIdx }  — no match found
+//    { id, type:'study-done',  html, confHTML, confidence, canDecrypt }
+//
+//  canDecrypt = false triggers the CT-303 error in translator.js.
+// ════════════════════════════════════════════════════════════════════════
+
+// fragment_count JS mirror of decrypt.c fragment_count()
+function fragmentCount(s) {
+  const lo = s.toLowerCase();
+  if (!lo) return 0;
+  let count = 1, inVowel = false, started = false;
+  for (let i = 0; i < lo.length; i++) {
+    const c = lo[i];
+    if (c === '-') { count++; inVowel = false; started = false; continue; }
+    if (!/[a-zA-Z]/.test(c)) continue;
+    const v = isVowelCh(c);
+    if (!started) { inVowel = v; started = true; continue; }
+    if (v && !inVowel) { count++; inVowel = true; }
+    else if (!v && inVowel) { count++; inVowel = false; }
+  }
+  return Math.max(1, count);
+}
+
+// decryptViable: mirrors decrypt.c decrypt_viable()
+function decryptViable(s) {
+  const t = s.trim();
+  if (!t || t.length > 40) return false;
+  if (!/[a-zA-Z]/.test(t)) return false;
+  if (!/^[a-zA-Z]/.test(t)) return false;
+  return true;
+}
+
+// studyTranslate: streaming decryption with progress messages
+// Sends a series of postMessages as it analyses each token, then
+// sends study-done with the final HTML once all tokens are processed.
+function studyTranslate(id, text, isStormy) {
+  const map      = isStormy ? STORMY_REV_MAP : CAT_REV_MAP;
+  const phonIdx  = isStormy ? STORMY_PHON_INDEX : CAT_PHON_INDEX;
+  initRevMaps();
+
+  // Pre-process and tokenise
+  let processed = text.trim();
+  if (map) processed = preprocessInput(processed, map);
+  const rawToks = processed.split(/\s+/).filter(t => t && t.trim());
+
+  // Check all tokens viable before starting
+  let anyViable = false;
+  for (const tok of rawToks) {
+    if (decryptViable(tok)) { anyViable = true; break; }
+  }
+  if (!anyViable) {
+    self.postMessage({ id, type: 'study-done', html: '', confHTML: '',
+                       confidence: 0, canDecrypt: false });
+    return;
+  }
+
+  // Signal start
+  const realToks = rawToks.filter(t => decryptViable(t));
+  self.postMessage({ id, type: 'study-start', tokenCount: realToks.length });
+
+  // Process each token with small async gaps via chunked posting
+  // In a Worker we don't have setTimeout, so we process synchronously
+  // but post intermediate messages. The UI applies CSS animations.
+  const resultTokens = [];
+  let tokenIdx = 0;
+
+  for (const tok of rawToks) {
+    if (!decryptViable(tok)) {
+      // Pass spaces and punctuation through silently
+      if (/^\s+$/.test(tok)) resultTokens.push({ type:'space', v:' ' });
+      else resultTokens.push({ type:'punct', v: tok });
+      continue;
+    }
+
+    // Announce we're studying this token
+    self.postMessage({ id, type: 'study-token', token: tok, tokenIdx });
+
+    // Emit fragment events — UI shows letters appearing one fragment at a time
+    const fc = fragmentCount(tok);
+    for (let fi = 0; fi < fc; fi++) {
+      // Emit fragment
+      const start = fragmentStart(tok, fi);
+      const flen  = fragmentLength(tok, fi);
+      const frag  = tok.slice(start, start + flen);
+      self.postMessage({ id, type: 'study-frag', frag, tokenIdx, fragIdx: fi, fragCount: fc });
+    }
+
+    // Now do the actual lookup
+    const inputCap = detectCap(tok);
+    const match    = isStormy
+      ? reverseTokenStormy(tok, map, phonIdx)
+      : reverseTokenWithAlias(tok, map, phonIdx);
+
+    if (match) {
+      const isCurse = match.entry.label === 'curse';
+      const raw     = isCurse ? censorWord(match.entry.eng) : match.entry.eng;
+      const conf    = match.score >= 0.9 ? 'high' : match.score >= MATCH_THRESHOLD ? 'mid' : 'low';
+      const display = applyCap(inputCap, raw);
+      self.postMessage({ id, type: 'study-match', token: tok, match: display,
+                         score: match.score, tokenIdx });
+      resultTokens.push({ type:'word', mode: match.entry.label ? 'stormy-special' : 'normal',
+                          label: match.entry.label, conf, pass: match.pass, score: match.score,
+                          v: display });
+    } else {
+      self.postMessage({ id, type: 'study-fail', token: tok, tokenIdx });
+      resultTokens.push({ type:'word', mode:'unknown', conf:'low', pass:0, score:0, v: tok });
+    }
+
+    tokenIdx++;
+  }
+
+  // All done — render final HTML
+  const direction = isStormy ? 'from-stormy' : 'from-cat';
+  const html      = renderTokens(resultTokens, direction);
+  const score     = phraseConfidence(resultTokens);
+  const label     = confidenceLabel(score);
+  const confHTML  = buildConfidenceHTML(score, label);
+
+  // canDecrypt = false if every word token was unknown
+  const wordTokens  = resultTokens.filter(t => t.type === 'word');
+  const unknownAll  = wordTokens.length > 0 && wordTokens.every(t => t.mode === 'unknown');
+  const canDecrypt  = !unknownAll && wordTokens.length > 0;
+
+  self.postMessage({ id, type: 'study-done', html, confHTML,
+                     confidence: score, canDecrypt });
+}
+
+// fragmentStart/fragmentLength — JS mirrors of decrypt.c functions
+function fragmentStart(s, idx) {
+  if (idx === 0) return 0;
+  let frag = 0, inVowel = false, started = false;
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    if (c === '-') { frag++; if (frag === idx) return i + 1; inVowel = false; started = false; continue; }
+    if (!/[a-zA-Z]/.test(c)) continue;
+    const v = isVowelCh(c);
+    if (!started) { inVowel = v; started = true; continue; }
+    if (v && !inVowel) { frag++; if (frag === idx) return i; inVowel = true; }
+    else if (!v && inVowel) { frag++; if (frag === idx) return i; inVowel = false; }
+  }
+  return s.length;
+}
+
+function fragmentLength(s, idx) {
+  const start = fragmentStart(s, idx);
+  const next  = fragmentStart(s, idx + 1);
+  return Math.max(0, (next > s.length ? s.length : next) - start);
+}
+
 if (typeof self !== 'undefined' && typeof WorkerGlobalScope !== 'undefined'
     && self instanceof WorkerGlobalScope) {
   self.onmessage = function(e) {
     const { id, type, text, lang, toneLevel } = e.data;
+
     if (type === 'random') {
       self.postMessage({ id, text: getRandomPhrase(lang || 'cat') });
       return;
     }
+
+    // Streaming study mode
+    if (type === 'study') {
+      studyTranslate(id, text, lang === 'stormy');
+      return;
+    }
+
     const result = doTranslate(type, text, toneLevel);
-    self.postMessage({ id, html: result.html, confHTML: result.confHTML, confidence: result.confidence });
+    self.postMessage({ id, html: result.html, confHTML: result.confHTML,
+                       confidence: result.confidence });
   };
 }
 
