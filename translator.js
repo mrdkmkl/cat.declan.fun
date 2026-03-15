@@ -1,73 +1,59 @@
 // ════════════════════════════════════════════════════════════════════════
-//  translator.js — Cat Translator UI  v6.0
-//  Fixed: ask() toneLevel scoping, all undefined variable references.
-//  Advanced: hover tooltips showing original English, output word count,
-//  auto-detect language direction, keyboard shortcuts, live tone preview.
+//  translator.js  —  Cat Translator UI  v7.0
+//  Streaming study animation for Cat/Stormy → English decryption.
 // ════════════════════════════════════════════════════════════════════════
 
 const WORD_LIMIT      = 100;
-const DEBOUNCE_MS     = 60;
-const TRANSLATING_MS  = 140;
+const DEBOUNCE_MS     = 80;
+const TRANSLATING_MS  = 160;
 const COPY_CONFIRM_MS = 1500;
 
 const PLACEHOLDER_HTML = '<span class="output-placeholder">Translation appears here\u2026</span>';
 const TRANSLATING_HTML = '<span class="translating-msg">Translating\u2026</span>';
-// Error codes — keep in sync with error.html ERROR_CATALOGUE
+
+// ── Error catalogue (keep in sync with error.html) ─────────────────────
 const ERRORS = {
-  WORKER_FAILED:   'CT-100',
-  WORKER_TIMEOUT:  'CT-101',
-  WORKER_CRASH:    'CT-102',
-  DICT_MISSING:    'CT-200',
-  TRANS_FAILED:    'CT-300',
-  INPUT_LONG:      'CT-400',
-  INPUT_EMPTY:     'CT-401',
-  WORD_TOO_LONG:   'CT-402',
-  WORD_GIBBERISH:  'CT-403',
-  TONE_INVALID:    'CT-404',
-  CLIPBOARD_FAIL:  'CT-405',
-  LOAD_FAIL:       'CT-500',
-  RANDOM_FAIL:     'CT-501',
-  SWAP_FAIL:       'CT-502',
-  UNKNOWN:         'CT-900',
+  WORKER_FAILED:  'CT-100',
+  WORKER_TIMEOUT: 'CT-101',
+  DICT_MISSING:   'CT-200',
+  TRANS_FAILED:   'CT-300',
+  DECRYPT_FAIL:   'CT-303',
+  INPUT_LONG:     'CT-400',
+  INPUT_EMPTY:    'CT-401',
+  WORD_TOO_LONG:  'CT-402',
+  LOAD_FAIL:      'CT-500',
+  RANDOM_FAIL:    'CT-501',
+  UNKNOWN:        'CT-900',
 };
 
-const MAX_WORD_CHARS = 34; // single word character limit
+const MAX_WORD_CHARS = 34;
 
 function makeErrorHTML(code, hint) {
-  var labels = {
-    'CT-100':'Worker failed to start',
-    'CT-101':'Worker timed out',
-    'CT-102':'Worker crashed',
-    'CT-200':'Dictionary not loaded',
-    'CT-300':'Translation failed',
-    'CT-400':'Input too long',
-    'CT-401':'Empty input',
-    'CT-402':'Word too long',
-    'CT-403':'Unreadable input',
-    'CT-404':'Invalid tone level',
-    'CT-405':'Clipboard error',
-    'CT-500':'Script load error',
-    'CT-501':'Random phrase failed',
-    'CT-502':'Swap failed',
+  const labels = {
+    'CT-100':'Worker failed to start', 'CT-101':'Worker timed out',
+    'CT-200':'Dictionary not loaded',  'CT-300':'Translation failed',
+    'CT-303':'Cannot decrypt message', 'CT-400':'Input too long',
+    'CT-401':'Empty input',            'CT-402':'Word too long',
+    'CT-500':'Script load error',      'CT-501':'Random phrase failed',
     'CT-900':'Unknown error',
   };
-  var h = hint ? '<div class="error-hint">' + hint + '</div>' : '';
-  return '<div class="error-notice">' +
-    '<div class="error-code">' + code + '</div>' +
-    '<div class="error-message">' + (labels[code] || 'Error') + '</div>' + h +
-    '<div class="error-hint" style="margin-top:0.4rem">' +
-    '<a href="error.html?code=' + code + '" style="color:var(--curse);text-decoration:underline">More info</a>' +
-    '</div></div>';
+  const h = hint ? `<div class="error-hint">${hint}</div>` : '';
+  return `<div class="error-notice">` +
+    `<div class="error-code">${code}</div>` +
+    `<div class="error-message">${labels[code] || 'Error'}</div>${h}` +
+    `<div class="error-hint" style="margin-top:0.4rem">` +
+    `<a href="error.html?code=${code}" style="color:var(--curse);text-decoration:underline">More info</a>` +
+    `</div></div>`;
 }
 
 function goErrorPage(code, context) {
-  var url = 'error.html?code=' + encodeURIComponent(code);
-  if (context) url += '&context=' + encodeURIComponent(context);
-  url += '&from=' + encodeURIComponent(window.location.pathname);
+  let url = `error.html?code=${encodeURIComponent(code)}`;
+  if (context) url += `&context=${encodeURIComponent(context)}`;
+  url += `&from=${encodeURIComponent(window.location.pathname)}`;
   window.location.href = url;
 }
 
-// ── Utilities ─────────────────────────────────────────────────────────────
+// ── Word utilities ─────────────────────────────────────────────────────
 function countWords(text) {
   if (!text || !text.trim()) return 0;
   return text.trim().split(/\s+/).filter(w => w.replace(/[^a-zA-Z']/g, '').length > 0).length;
@@ -87,18 +73,27 @@ function enforceWordLimit(el) {
 //  MODE CONFIG
 // ════════════════════════════════════════════════════════════════════════
 const MODES = {
-  'en-cat':    { leftLang:'English', rightHTML:'<strong>Cat</strong>',
-                 ph:'Type in English\u2026 (max 100 words)',
-                 dir:'to-cat',      group:'cat',    hasLimit:true,  showRandom:false, randomLang:null },
-  'en-stormy': { leftLang:'English', rightHTML:'<strong>Stormy</strong><span class="stormy-label-badge">extended</span>',
-                 ph:'Type in English\u2026 (max 100 words)',
-                 dir:'to-stormy',   group:'stormy', hasLimit:true,  showRandom:false, randomLang:null },
-  'cat-en':    { leftLang:'Cat',     rightHTML:'<strong>English</strong>',
-                 ph:'Type Cat sounds\u2026 or press Random',
-                 dir:'from-cat',    group:'cat',    hasLimit:false, showRandom:true,  randomLang:'cat' },
-  'stormy-en': { leftLang:'Stormy',  rightHTML:'<strong>English</strong>',
-                 ph:'Type Stormy sounds\u2026 or press Random',
-                 dir:'from-stormy', group:'stormy', hasLimit:false, showRandom:true,  randomLang:'stormy' },
+  'en-cat': {
+    leftLang:'English', rightHTML:'<strong>Cat</strong>',
+    ph:'Type in English\u2026 (max 100 words)',
+    dir:'to-cat', group:'cat', hasLimit:true, isReverse:false, showRandom:false, randomLang:null,
+  },
+  'en-stormy': {
+    leftLang:'English',
+    rightHTML:'<strong>Stormy</strong><span class="stormy-label-badge">extended</span>',
+    ph:'Type in English\u2026 (max 100 words)',
+    dir:'to-stormy', group:'stormy', hasLimit:true, isReverse:false, showRandom:false, randomLang:null,
+  },
+  'cat-en': {
+    leftLang:'Cat', rightHTML:'<strong>English</strong>',
+    ph:'Type Cat sounds\u2026 or press Random',
+    dir:'from-cat', group:'cat', hasLimit:false, isReverse:true, showRandom:true, randomLang:'cat',
+  },
+  'stormy-en': {
+    leftLang:'Stormy', rightHTML:'<strong>English</strong>',
+    ph:'Type Stormy sounds\u2026 or press Random',
+    dir:'from-stormy', group:'stormy', hasLimit:false, isReverse:true, showRandom:true, randomLang:'stormy',
+  },
 };
 
 const SWAP_MAP = {
@@ -106,78 +101,112 @@ const SWAP_MAP = {
   'en-stormy':'stormy-en', 'stormy-en':'en-stormy',
 };
 
-const CAT_TONE_LABELS    = ['', 'Normal', 'Louder', 'Very Loud'];
-const STORMY_TONE_LABELS = ['', 'Whisper', 'Quiet', 'Normal', 'Intense', 'Maximum'];
+const CAT_TONE_LABELS    = ['','Normal','Louder','Very Loud'];
+const STORMY_TONE_LABELS = ['','Whisper','Quiet','Normal','Intense','Maximum'];
 
 // ════════════════════════════════════════════════════════════════════════
 //  WORKER BRIDGE
-//  ask(type, text, lang, toneLevel) — all 4 params explicit, no closures
 // ════════════════════════════════════════════════════════════════════════
 let useWorker  = false;
 let workerObj  = null;
-const pendingReqs = {};
+const pendingReqs  = {};   // id → resolve  (for one-shot requests)
+const streamReqs   = {};   // id → handlers (for streaming study)
 let reqCounter = 0;
 
 function initBridge(onReady) {
   try {
     const w = new Worker('worker.js');
+
     w.onmessage = function(e) {
-      const p = pendingReqs[e.data.id];
-      if (p) { p(e.data); delete pendingReqs[e.data.id]; }
+      const d = e.data;
+      // Streaming study events
+      if (d.type && d.type.startsWith('study-')) {
+        const h = streamReqs[d.id];
+        if (h) {
+          h(d);
+          if (d.type === 'study-done') delete streamReqs[d.id];
+        }
+        return;
+      }
+      // Normal one-shot responses
+      const p = pendingReqs[d.id];
+      if (p) { p(d); delete pendingReqs[d.id]; }
     };
+
     w.onerror = function(err) {
-      console.warn('[CT] Worker error:', err.message || err);
-      useWorker = false; workerObj = null;
-      // Don't redirect — fall back to direct mode silently
-      onReady();
+      console.warn('[CT] Worker error (CT-100):', err.message || err);
+      useWorker = false; workerObj = null; onReady();
     };
-    // Ping the worker; if it responds we know it loaded dictionary correctly
+
     const testId = ++reqCounter;
     pendingReqs[testId] = function() { useWorker = true; workerObj = w; onReady(); };
     w.postMessage({ id: testId, type: 'to-cat', text: 'hello', toneLevel: 1 });
+
     setTimeout(function() {
       if (pendingReqs[testId]) {
         delete pendingReqs[testId];
-        console.warn('[CT] Worker timeout (CT-101), switching to direct mode');
+        console.warn('[CT] Worker timeout (CT-101)');
         useWorker = false; workerObj = null;
-        try { w.terminate(); } catch(e2) {}
+        try { w.terminate(); } catch(e) {}
         onReady();
       }
     }, 2500);
-  } catch (e) {
+
+  } catch(e) {
     console.warn('[CT] Worker unavailable:', e.message);
     useWorker = false; workerObj = null; onReady();
   }
 }
 
-// ── ask() — the ONLY place we touch worker / direct mode ─────────────────
-// toneLevel is passed explicitly so there are no closure surprises.
+// One-shot ask (forward translation, random, instant reverse)
 function ask(type, text, lang, toneLevel) {
   return new Promise(function(resolve) {
     if (useWorker && workerObj) {
       const id = ++reqCounter;
       pendingReqs[id] = resolve;
-      workerObj.postMessage({ id, type, text, lang, toneLevel: toneLevel });
+      workerObj.postMessage({ id, type, text, lang, toneLevel });
     } else {
-      // Direct / fallback mode — call window._catEngine synchronously in a micro-task
       Promise.resolve().then(function() {
         try {
           const eng = window._catEngine;
-          if (!eng) { resolve({ html: makeErrorHTML(ERRORS.DICT_MISSING, 'dictionary.js may not have loaded'), confHTML: '', confidence: 0 }); return; }
-
-          if (type === 'random') {
-            resolve({ text: eng.getRandomPhrase(lang || 'cat') }); return;
-          }
-
+          if (!eng) { resolve({ html: makeErrorHTML(ERRORS.DICT_MISSING), confHTML:'', confidence:0 }); return; }
+          if (type === 'random') { resolve({ text: eng.getRandomPhrase(lang||'cat') }); return; }
           const result = eng.doTranslate(type, text, toneLevel);
-          const confHTML = (type === 'from-cat' || type === 'from-stormy') && eng.buildConfidenceHTML
-            ? eng.buildConfidenceHTML(result.confidence, result.label)
-            : '';
-          resolve({ html: result.html, confHTML, confidence: result.confidence });
-        } catch (err) {
-          console.error('[CT] Direct translate error:', err);
-          var code = err.message && err.message.includes('dict') ? ERRORS.DICT_MISSING : ERRORS.TRANS_FAILED;
-          resolve({ html: makeErrorHTML(code, err.message), confHTML: '', confidence: 0 });
+          const confHTML = (type==='from-cat'||type==='from-stormy') && eng.buildConfidenceHTML
+            ? eng.buildConfidenceHTML(result.confidence, result.label) : '';
+          resolve({ html:result.html, confHTML, confidence:result.confidence });
+        } catch(err) {
+          resolve({ html: makeErrorHTML(ERRORS.TRANS_FAILED, err.message), confHTML:'', confidence:0 });
+        }
+      });
+    }
+  });
+}
+
+// Streaming study request — calls onEvent for each step, returns promise for final done
+function askStudy(text, isStormy, onEvent) {
+  return new Promise(function(resolve) {
+    if (useWorker && workerObj) {
+      const id = ++reqCounter;
+      streamReqs[id] = function(d) {
+        if (d.type === 'study-done') resolve(d);
+        else onEvent(d);
+      };
+      workerObj.postMessage({
+        id, type: 'study', text, lang: isStormy ? 'stormy' : 'cat'
+      });
+    } else {
+      // Direct fallback — no animation, just instant translate
+      Promise.resolve().then(function() {
+        try {
+          const eng = window._catEngine;
+          if (!eng) { resolve({ html: makeErrorHTML(ERRORS.DICT_MISSING), confHTML:'', confidence:0, canDecrypt:false }); return; }
+          const t = isStormy ? 'from-stormy' : 'from-cat';
+          const result = eng.doTranslate(t, text, 1);
+          const confHTML = eng.buildConfidenceHTML ? eng.buildConfidenceHTML(result.confidence, result.label) : '';
+          resolve({ html:result.html, confHTML, confidence:result.confidence, canDecrypt: result.confidence > 0.1 });
+        } catch(err) {
+          resolve({ html: makeErrorHTML(ERRORS.TRANS_FAILED, err.message), confHTML:'', confidence:0, canDecrypt:false });
         }
       });
     }
@@ -185,7 +214,148 @@ function ask(type, text, lang, toneLevel) {
 }
 
 // ════════════════════════════════════════════════════════════════════════
-//  ADVANCED: OUTPUT WORD COUNT BADGE
+//  STUDY ANIMATION  —  the "decrypting" loading screen inside the output
+// ════════════════════════════════════════════════════════════════════════
+function buildStudyScreen(tokenCount) {
+  return `<div class="study-screen" id="study-screen">
+    <div class="study-title">
+      <span class="study-icon">🔍</span>
+      <span class="study-label">Decrypting</span>
+      <span class="study-dots"><span></span><span></span><span></span></span>
+    </div>
+    <div class="study-tokens" id="study-tokens"></div>
+    <div class="study-progress-wrap">
+      <div class="study-progress-bar" id="study-progress-bar"></div>
+    </div>
+    <div class="study-status" id="study-status">Reading phoneme signals\u2026</div>
+  </div>`;
+}
+
+const STUDY_STATUSES = [
+  'Reading phoneme signals\u2026',
+  'Analysing vowel density\u2026',
+  'Measuring consonant runs\u2026',
+  'Checking phoneme class\u2026',
+  'Scoring dictionary candidates\u2026',
+  'Verifying signal vector\u2026',
+  'Consulting the cat\u2026',
+  'Cross-referencing cat dialect\u2026',
+  'Applying cap weight analysis\u2026',
+  'Decryption in progress\u2026',
+];
+
+function runStudyAnimation(outputEl, text, isStormy) {
+  return new Promise(function(resolve) {
+    let tokenCount = 0;
+    let doneTokens = 0;
+    let statusIdx   = 0;
+    let statusTimer = null;
+    const fragBufs  = {};  // tokenIdx → accumulated frag string
+
+    function cycleStatus() {
+      const statusEl = document.getElementById('study-status');
+      if (statusEl) {
+        statusEl.textContent = STUDY_STATUSES[statusIdx % STUDY_STATUSES.length];
+        statusIdx++;
+      }
+      statusTimer = setTimeout(cycleStatus, 480);
+    }
+
+    function onEvent(d) {
+      if (d.type === 'study-start') {
+        tokenCount = d.tokenCount;
+        outputEl.innerHTML = buildStudyScreen(tokenCount);
+        statusTimer = setTimeout(cycleStatus, 480);
+
+      } else if (d.type === 'study-token') {
+        // Add a token slot to the display
+        const container = document.getElementById('study-tokens');
+        if (container) {
+          const slot = document.createElement('div');
+          slot.className = 'study-token-slot';
+          slot.id = `study-tok-${d.tokenIdx}`;
+          const orig = document.createElement('span');
+          orig.className = 'study-token-orig';
+          orig.textContent = d.token;
+          const arrow = document.createElement('span');
+          arrow.className = 'study-token-arrow';
+          arrow.textContent = '\u2192';
+          const result = document.createElement('span');
+          result.className = 'study-token-result pending';
+          result.id = `study-result-${d.tokenIdx}`;
+          result.textContent = '\u00b7\u00b7\u00b7';
+          slot.appendChild(orig);
+          slot.appendChild(arrow);
+          slot.appendChild(result);
+          container.appendChild(slot);
+        }
+
+      } else if (d.type === 'study-frag') {
+        // Accumulate fragments into the orig span to show letter-by-letter reveal
+        const slot = document.getElementById(`study-tok-${d.tokenIdx}`);
+        if (slot) {
+          const origEl = slot.querySelector('.study-token-orig');
+          if (origEl) {
+            // Highlight the current fragment within the token
+            const token = d.token || origEl.dataset.token || origEl.textContent;
+            origEl.dataset.token = token;
+            // Reveal up to current fragment
+            origEl.innerHTML = buildFragHighlight(token, d.fragIdx, d.fragCount);
+          }
+        }
+
+      } else if (d.type === 'study-match') {
+        // Replace the ··· with the actual decoded word
+        const resEl = document.getElementById(`study-result-${d.tokenIdx}`);
+        if (resEl) {
+          resEl.classList.remove('pending');
+          resEl.classList.add('matched', d.score >= 0.9 ? 'high' : d.score >= 0.58 ? 'mid' : 'low');
+          resEl.textContent = d.match;
+        }
+        doneTokens++;
+        updateProgress(doneTokens, tokenCount);
+
+      } else if (d.type === 'study-fail') {
+        const resEl = document.getElementById(`study-result-${d.tokenIdx}`);
+        if (resEl) {
+          resEl.classList.remove('pending');
+          resEl.classList.add('failed');
+          resEl.textContent = '?';
+        }
+        doneTokens++;
+        updateProgress(doneTokens, tokenCount);
+      }
+    }
+
+    function updateProgress(done, total) {
+      const bar = document.getElementById('study-progress-bar');
+      if (bar && total > 0) bar.style.width = Math.round(done / total * 100) + '%';
+    }
+
+    function buildFragHighlight(token, fragIdx, fragCount) {
+      // Show all letters up to current fragment highlighted, rest dimmed
+      // Simple: first fragIdx+1 chunks revealed, rest shown as dim
+      const fraction = (fragIdx + 1) / fragCount;
+      const revealLen = Math.max(1, Math.round(token.length * fraction));
+      const revealed = token.slice(0, revealLen);
+      const hidden   = token.slice(revealLen);
+      return `<span class="study-frag-revealed">${escHtml(revealed)}</span>` +
+             (hidden ? `<span class="study-frag-hidden">${escHtml(hidden)}</span>` : '');
+    }
+
+    function escHtml(s) {
+      return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    }
+
+    askStudy(text, isStormy, onEvent).then(function(finalResult) {
+      clearTimeout(statusTimer);
+      resolve(finalResult);
+    });
+  });
+}
+
+// ════════════════════════════════════════════════════════════════════════
+//  OUTPUT UTILITIES
 // ════════════════════════════════════════════════════════════════════════
 function updateOutputBadge(badgeEl, html) {
   if (!badgeEl) return;
@@ -194,46 +364,25 @@ function updateOutputBadge(badgeEl, html) {
   badgeEl.textContent = words > 0 ? words + ' words' : '';
 }
 
-// ════════════════════════════════════════════════════════════════════════
-//  ADVANCED: HOVER TOOLTIP (title attr) for word spans
-//  Adds data-original attributes from source text to translated spans
-//  so hovering a cat sound shows the original English word.
-// ════════════════════════════════════════════════════════════════════════
 function attachTooltips(outputEl, sourceText, direction) {
   if (!sourceText || !direction.startsWith('to-')) return;
-  const words  = sourceText.trim().split(/\s+/).filter(Boolean);
-  const spans  = outputEl.querySelectorAll('span.col-cat, span.col-stormy, span.col-low, span.col-curse, span.col-intense, span.col-vocab');
+  const words = sourceText.trim().split(/\s+/).filter(Boolean);
+  const spans = outputEl.querySelectorAll('span.col-cat,span.col-stormy,span.col-low,span.col-curse,span.col-intense,span.col-vocab');
   let wi = 0;
   spans.forEach(function(span) {
-    if (wi < words.length) {
-      span.title = words[wi++];
-      span.style.cursor = 'help';
-    }
+    if (wi < words.length) { span.title = words[wi++]; }
   });
 }
 
-// ════════════════════════════════════════════════════════════════════════
-//  ADVANCED: AUTO-DETECT if pasted text looks like cat/stormy sounds
-//  and auto-switch to the correct reverse mode.
-// ════════════════════════════════════════════════════════════════════════
 const CAT_SOUND_PATTERN = /^([Mm]ew|[Pp]urr|[Cc]hirp|[Hh]iss|[Mm]r+ow|[Mm]r+p|[Nn]yaow|[Mm]rowl|[Ss]niff|[Nn]om|[Yy]owl|MEOW|HISS|MROWRR|NYAOW|CHIRP|TRILL)/;
-
-function looksLikeCatSound(text) {
-  const first = text.trim().split(/\s+/)[0] || '';
-  return CAT_SOUND_PATTERN.test(first);
-}
-
-function looksLikeStormySound(text) {
-  // Stormy sounds have very long vowel runs (4+ in a row)
-  return /[aeiouAEIOU]{4,}/.test(text);
-}
+function looksLikeCatSound(text) { return CAT_SOUND_PATTERN.test(text.trim().split(/\s+/)[0] || ''); }
+function looksLikeStormySound(text) { return /[aeiouAEIOU]{4,}/.test(text); }
 
 // ════════════════════════════════════════════════════════════════════════
 //  UI CONTROLLER
 // ════════════════════════════════════════════════════════════════════════
 document.addEventListener('DOMContentLoaded', function() {
 
-  // ── DOM refs ───────────────────────────────────────────────────────────
   const inputEl         = document.getElementById('input-text');
   const outputEl        = document.getElementById('output-area');
   const confEl          = document.getElementById('conf-area');
@@ -255,23 +404,20 @@ document.addEventListener('DOMContentLoaded', function() {
   const toneLabelCat    = document.getElementById('tone-label-cat');
   const toneLabelStormy = document.getElementById('tone-label-stormy');
 
-  // ── State ──────────────────────────────────────────────────────────────
   let currentMode     = 'en-cat';
-  let catToneLevel    = 1;   // 1–3
-  let stormyToneLevel = 3;   // 1–5
+  let catToneLevel    = 1;
+  let stormyToneLevel = 3;
   let debounceTimer;
   let latestReqId     = 0;
+  let studyInProgress = false;
 
-  // ── Helpers ────────────────────────────────────────────────────────────
   function getToneLevel() {
     const cfg = MODES[currentMode];
-    var level = cfg.group === 'stormy' ? stormyToneLevel : catToneLevel;
-    var min = 1, max = cfg.group === 'stormy' ? 5 : 3;
-    if (level < min || level > max || isNaN(level)) {
-      console.warn('[CT] Invalid tone level', level, '— resetting to default');
-      if (cfg.group === 'stormy') stormyToneLevel = 3;
-      else catToneLevel = 1;
+    let level = cfg.group === 'stormy' ? stormyToneLevel : catToneLevel;
+    const max = cfg.group === 'stormy' ? 5 : 3;
+    if (level < 1 || level > max || isNaN(level)) {
       level = cfg.group === 'stormy' ? 3 : 1;
+      if (cfg.group === 'stormy') stormyToneLevel = 3; else catToneLevel = 1;
     }
     return level;
   }
@@ -295,11 +441,10 @@ document.addEventListener('DOMContentLoaded', function() {
   }
 
   function showToneButtons(cfg) {
-    if (toneBtnCat)    toneBtnCat.style.display    = (cfg.group === 'cat'    && cfg.dir.startsWith('to')) ? 'inline' : 'none';
-    if (toneBtnStormy) toneBtnStormy.style.display = (cfg.group === 'stormy' && cfg.dir.startsWith('to')) ? 'inline' : 'none';
+    if (toneBtnCat)    toneBtnCat.style.display    = (cfg.group==='cat'    && !cfg.isReverse) ? 'inline' : 'none';
+    if (toneBtnStormy) toneBtnStormy.style.display = (cfg.group==='stormy' && !cfg.isReverse) ? 'inline' : 'none';
   }
 
-  // ── Set mode ────────────────────────────────────────────────────────────
   function setMode(mode) {
     currentMode = mode;
     const cfg   = MODES[mode];
@@ -309,22 +454,22 @@ document.addEventListener('DOMContentLoaded', function() {
     modeBtns.forEach(function(btn) {
       const on = btn.dataset.mode === mode;
       btn.classList.toggle('active', on);
-      btn.classList.remove('cat-mode', 'stormy-mode');
+      btn.classList.remove('cat-mode','stormy-mode');
       if (on) btn.classList.add(cfg.group === 'stormy' ? 'stormy-mode' : 'cat-mode');
     });
     if (randBtn) {
       randBtn.style.display = cfg.showRandom ? 'inline' : 'none';
       randBtn.className = 'random-btn' + (cfg.group === 'stormy' ? ' stormy-mode' : '');
     }
-    if (confEl) confEl.innerHTML = '';
-    if (outputBadgeEl) outputBadgeEl.textContent = '';
+    if (confEl)         confEl.innerHTML = '';
+    if (outputBadgeEl)  outputBadgeEl.textContent = '';
     showToneButtons(cfg);
     closeTonePopups();
     updateCounter();
     scheduleTranslate();
   }
 
-  // ── Core translate ──────────────────────────────────────────────────────
+  // ── Core translate ──────────────────────────────────────────────────
   async function doTranslate() {
     const text = inputEl.value.trim();
     if (!text) {
@@ -334,30 +479,57 @@ document.addEventListener('DOMContentLoaded', function() {
       return;
     }
 
-    // Check for empty / whitespace-only
-    if (!text.replace(/\s/g, '')) {
-      outputEl.innerHTML = makeErrorHTML(ERRORS.INPUT_EMPTY, 'Type something first');
-      return;
-    }
+    const myId = ++latestReqId;
+    const cfg  = MODES[currentMode];
 
-    // Check for individual words exceeding MAX_WORD_CHARS
-    if (MODES[currentMode].dir.startsWith('to-')) {
-      var tokens = text.split(/\s+/);
-      for (var ti = 0; ti < tokens.length; ti++) {
-        var tok = tokens[ti].replace(/[^a-zA-Z']/g, '');
-        if (tok.length > MAX_WORD_CHARS) {
+    // Validate input
+    if (cfg.hasLimit) {
+      const tokens = text.split(/\s+/);
+      for (const tok of tokens) {
+        const clean = tok.replace(/[^a-zA-Z']/g, '');
+        if (clean.length > MAX_WORD_CHARS) {
           goErrorPage(ERRORS.WORD_TOO_LONG,
-            'Word "' + tokens[ti].slice(0, 20) + (tokens[ti].length > 20 ? '...' : '') +
-            '" has ' + tok.length + ' characters (max ' + MAX_WORD_CHARS + ')');
+            `"${tok.slice(0,20)}${tok.length>20?'...':''}" has ${clean.length} chars (max ${MAX_WORD_CHARS})`);
           return;
         }
       }
     }
 
-    const myId     = ++latestReqId;
-    const cfg      = MODES[currentMode];
-    const tone     = getToneLevel(); // captured NOW, not in a callback
+    // === REVERSE MODE: use streaming study animation ===
+    if (cfg.isReverse) {
+      if (studyInProgress) return;
+      studyInProgress = true;
+      if (confEl) confEl.innerHTML = '';
+      if (outputBadgeEl) outputBadgeEl.textContent = '';
 
+      const isStormy = cfg.group === 'stormy';
+
+      // Show a brief "preparing" state before study starts
+      outputEl.innerHTML = TRANSLATING_HTML;
+
+      const finalResult = await runStudyAnimation(outputEl, text, isStormy);
+      studyInProgress = false;
+
+      // Check if this is still the latest request
+      if (latestReqId !== myId) return;
+
+      if (!finalResult.canDecrypt) {
+        // CT-303: could not decrypt any tokens
+        goErrorPage(ERRORS.DECRYPT_FAIL,
+          'None of the input sounds could be matched to known cat vocabulary. ' +
+          'Make sure you\'re using sounds generated by this translator.');
+        return;
+      }
+
+      // Show final output with reveal animation
+      outputEl.innerHTML = `<div class="study-result-reveal">${finalResult.html}</div>`;
+      if (confEl) confEl.innerHTML = finalResult.confHTML || '';
+      updateOutputBadge(outputBadgeEl, finalResult.html);
+      return;
+    }
+
+    // === FORWARD MODE: normal instant translation ===
+    const tone      = getToneLevel();
     const indicator = setTimeout(function() {
       if (latestReqId === myId) outputEl.innerHTML = TRANSLATING_HTML;
     }, TRANSLATING_MS);
@@ -365,27 +537,16 @@ document.addEventListener('DOMContentLoaded', function() {
     let result;
     try {
       result = await ask(cfg.dir, text, cfg.randomLang, tone);
-    } catch (e) {
-      console.error('[CT] doTranslate error:', e);
-      result = { html: makeErrorHTML(ERRORS.TRANS_FAILED, e.message), confHTML: '', confidence: 0 };
+    } catch(e) {
+      result = { html: makeErrorHTML(ERRORS.TRANS_FAILED, e.message), confHTML:'', confidence:0 };
     }
-
     clearTimeout(indicator);
 
     if (latestReqId === myId) {
       outputEl.innerHTML = result.html || PLACEHOLDER_HTML;
-
-      // Advanced: attach hover tooltips linking cat sound → English word
       attachTooltips(outputEl, text, cfg.dir);
-
-      // Advanced: output word badge
       updateOutputBadge(outputBadgeEl, result.html || '');
-
-      // Confidence bar (reverse modes only)
-      if (confEl) {
-        confEl.innerHTML = (cfg.dir === 'from-cat' || cfg.dir === 'from-stormy')
-          ? (result.confHTML || '') : '';
-      }
+      if (confEl) confEl.innerHTML = '';
     }
   }
 
@@ -394,7 +555,7 @@ document.addEventListener('DOMContentLoaded', function() {
     debounceTimer = setTimeout(doTranslate, DEBOUNCE_MS);
   }
 
-  // ── Random button ────────────────────────────────────────────────────────
+  // ── Random ───────────────────────────────────────────────────────────
   if (randBtn) {
     randBtn.addEventListener('click', async function() {
       const cfg = MODES[currentMode];
@@ -408,123 +569,91 @@ document.addEventListener('DOMContentLoaded', function() {
           updateCounter();
           await doTranslate();
         }
-      } catch (e) { /* non-fatal */ }
+      } catch(e) {
+        outputEl.innerHTML = makeErrorHTML(ERRORS.RANDOM_FAIL, e.message);
+      }
       randBtn.textContent = 'random';
       randBtn.disabled    = false;
     });
   }
 
-  // ── Input events ─────────────────────────────────────────────────────────
+  // ── Input events ──────────────────────────────────────────────────────
   inputEl.addEventListener('input', function() {
     const cfg = MODES[currentMode];
     if (cfg.hasLimit) enforceWordLimit(inputEl);
     updateCounter();
-    scheduleTranslate();
+    if (!studyInProgress) scheduleTranslate();
   });
 
-  // Advanced: paste auto-detect language
   inputEl.addEventListener('paste', function() {
     setTimeout(function() {
       const val = inputEl.value.trim();
       if (!val) return;
       const cfg = MODES[currentMode];
-      // Only auto-detect if we're in a reverse mode
-      if (cfg.dir === 'from-cat' || cfg.dir === 'from-stormy') {
-        if (looksLikeStormySound(val) && currentMode !== 'stormy-en') {
-          setMode('stormy-en');
-        } else if (looksLikeCatSound(val) && currentMode !== 'cat-en') {
-          setMode('cat-en');
-        }
+      if (cfg.isReverse) {
+        if (looksLikeStormySound(val) && currentMode !== 'stormy-en') setMode('stormy-en');
+        else if (looksLikeCatSound(val) && currentMode !== 'cat-en') setMode('cat-en');
       }
     }, 10);
   });
 
-  // Advanced: keyboard shortcuts
   inputEl.addEventListener('keydown', function(e) {
-    // Enter (no shift) → immediate translate
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault();
-      clearTimeout(debounceTimer);
-      doTranslate();
-    }
-    // Escape → clear
-    if (e.key === 'Escape') {
-      clearBtn.click();
-    }
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); clearTimeout(debounceTimer); doTranslate(); }
+    if (e.key === 'Escape') { clearBtn.click(); }
   });
 
-  // ── Mode buttons ──────────────────────────────────────────────────────────
   modeBtns.forEach(function(btn) {
     btn.addEventListener('click', function() { setMode(btn.dataset.mode); });
   });
 
-  // ── Clear ─────────────────────────────────────────────────────────────────
   clearBtn.addEventListener('click', function() {
-    inputEl.value       = '';
-    outputEl.innerHTML  = PLACEHOLDER_HTML;
+    studyInProgress = false;
+    inputEl.value   = '';
+    outputEl.innerHTML = PLACEHOLDER_HTML;
     if (confEl) confEl.innerHTML = '';
     if (outputBadgeEl) outputBadgeEl.textContent = '';
-    updateCounter();
-    inputEl.focus();
+    updateCounter(); inputEl.focus();
   });
 
-  // ── Copy ──────────────────────────────────────────────────────────────────
   copyBtn.addEventListener('click', function() {
-    const text = outputEl.innerText.replace(/\s+/g, ' ').trim();
+    const text = outputEl.innerText.replace(/\s+/g,' ').trim();
     if (!text || text === 'Translation appears here\u2026') return;
     const done = function() {
-      copyBtn.textContent = 'copied!';
-      copyBtn.classList.add('copied');
-      setTimeout(function() {
-        copyBtn.textContent = 'copy';
-        copyBtn.classList.remove('copied');
-      }, COPY_CONFIRM_MS);
+      copyBtn.textContent = 'copied!'; copyBtn.classList.add('copied');
+      setTimeout(function() { copyBtn.textContent = 'copy'; copyBtn.classList.remove('copied'); }, COPY_CONFIRM_MS);
     };
-    if (navigator.clipboard) {
-      navigator.clipboard.writeText(text).then(done).catch(function(err) {
-        console.warn('[CT] Clipboard error (CT-405):', err);
-        done(); // still show "copied" — it usually still worked
-      });
-    } else {
-      done();
-    }
+    if (navigator.clipboard) navigator.clipboard.writeText(text).then(done).catch(done);
+    else done();
   });
 
-  // ── Swap ──────────────────────────────────────────────────────────────────
   swapBtn.addEventListener('click', function() {
-    const out    = outputEl.innerText.replace(/\s+/g, ' ').trim();
+    if (studyInProgress) return;
+    const out    = outputEl.innerText.replace(/\s+/g,' ').trim();
     const target = SWAP_MAP[currentMode];
-    if (!target) {
-      console.warn('[CT] Swap target not found (CT-502) for mode:', currentMode);
-      return;
-    }
+    if (!target) return;
     setMode(target);
-    const skip = ['Translation appears here\u2026', 'Translating\u2026', ''];
+    const skip = ['Translation appears here\u2026','Translating\u2026',''];
     if (out && !skip.includes(out)) {
       inputEl.value = out;
       const cfg = MODES[target];
       if (cfg.hasLimit) enforceWordLimit(inputEl);
-      updateCounter();
-      doTranslate();
+      updateCounter(); doTranslate();
     }
   });
 
-  // ── Tone buttons ──────────────────────────────────────────────────────────
+  // ── Tone controls ─────────────────────────────────────────────────────
   if (toneBtnCat) {
     toneBtnCat.addEventListener('click', function(e) {
-      e.stopPropagation();
-      closeTonePopups();
+      e.stopPropagation(); closeTonePopups();
       if (tonePopupCat) tonePopupCat.classList.toggle('open');
     });
   }
   if (toneBtnStormy) {
     toneBtnStormy.addEventListener('click', function(e) {
-      e.stopPropagation();
-      closeTonePopups();
+      e.stopPropagation(); closeTonePopups();
       if (tonePopupStormy) tonePopupStormy.classList.toggle('open');
     });
   }
-
   if (toneSliderCat) {
     toneSliderCat.value = catToneLevel;
     updateToneLabel(toneSliderCat, toneLabelCat, CAT_TONE_LABELS);
@@ -534,7 +663,6 @@ document.addEventListener('DOMContentLoaded', function() {
       scheduleTranslate();
     });
   }
-
   if (toneSliderStormy) {
     toneSliderStormy.value = stormyToneLevel;
     updateToneLabel(toneSliderStormy, toneLabelStormy, STORMY_TONE_LABELS);
@@ -544,19 +672,14 @@ document.addEventListener('DOMContentLoaded', function() {
       scheduleTranslate();
     });
   }
-
-  // Close popups clicking outside
   document.addEventListener('click', function() { closeTonePopups(); });
-
-  // Close buttons inside popups
   document.querySelectorAll('.tone-popup-close').forEach(function(btn) {
     btn.addEventListener('click', function(e) { e.stopPropagation(); closeTonePopups(); });
   });
 
-  // ── Init ──────────────────────────────────────────────────────────────────
+  // ── Init ──────────────────────────────────────────────────────────────
   initBridge(function() {
     setMode('en-cat');
-    // Signal loading screen to dismiss
     if (typeof window._onTranslatorReady === 'function') window._onTranslatorReady();
   });
 });
