@@ -659,3 +659,18 @@ header {
   letter-spacing: 0.03em;
   line-height: 1.5;
 }
+
+/* ── Output badge ── */
+.output-badge {
+  font-size: 0.6rem;
+  color: var(--muted);
+  letter-spacing: 0.06em;
+  margin-left: auto;
+}
+
+/* ── Hover tooltip cursor on translated words ── */
+.pane-output [title] {
+  cursor: help;
+  border-bottom: 1px dotted currentColor;
+  text-decoration: none;
+}
