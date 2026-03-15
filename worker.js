@@ -1,385 +1,354 @@
-// ═══════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════
 //  worker.js — Cat Translator Web Worker
-//  Runs all translation on a background thread.
+//  All translation logic runs here on a background thread.
+//  Depends on: dictionary.js (loaded via importScripts)
 //
-//  Extra technology: WebAssembly (hash.c compiled to WASM)
-//  The djb2 hash function runs as native WASM code for
-//  deterministic, fast mapping of unknown words to cat sounds.
-//  Source: hash.c  |  117-byte binary embedded as base64 below.
-// ═══════════════════════════════════════════════════════
+//  Features:
+//   • Deterministic: every word always maps to the same cat sound
+//   • Unknown words: djb2 hash → single cat sound from pool (no chaining)
+//   • Reverse: greedy longest-match + Levenshtein fuzzy fallback
+//   • Capitalisation: ALL CAPS input → ALL CAPS output,
+//                     Capitalised input → Capitalised output
+//   • Stormy: vowel clusters extended by 4 chars
+// ═══════════════════════════════════════════════════════════════
 
 importScripts('dictionary.js');
 
-// ── WebAssembly djb2 hash module ─────────────────────────────────
-// Pre-compiled from hash.c. 117 bytes of pure WASM — no imports,
-// just a single exported function and a shared linear memory page.
-const WASM_B64 = 'AGFzbQEAAAABCAFgA39/fwF/AwIBAAUDAQABBxECBGRqYjIAAAZtZW1vcnkCAApFAUMDAX8BfwF/QYUqIQNBACEEAkADQCAEIAFPDQEgACAEai0AACEFIANBBXQgA2ogBXMhAyAEQQFqIQQMAAsLIAMgAnAL';
-
-let wasmDjb2  = null;  // the exported djb2 function
-let wasmMem   = null;  // Uint8Array view of WASM linear memory
-
-// Instantiate WASM synchronously using sync compilation
-// (Workers can use synchronous WASM APIs)
-(function initWasm() {
-  try {
-    const bin = Uint8Array.from(atob(WASM_B64), c => c.charCodeAt(0));
-    // Synchronous instantiation (valid in Worker scope)
-    const mod = new WebAssembly.Module(bin);
-    const inst = new WebAssembly.Instance(mod);
-    wasmDjb2 = inst.exports.djb2;
-    wasmMem  = new Uint8Array(inst.exports.memory.buffer);
-  } catch(e) {
-    // Fallback: pure JS djb2 if WASM fails for any reason
-    wasmDjb2 = null;
-  }
-})();
-
-// djb2 via WASM (or JS fallback)
-function djb2Hash(word, poolSize) {
-  if (wasmDjb2 && wasmMem) {
-    const bytes = [];
-    for (let i = 0; i < word.length && i < 512; i++)
-      bytes.push(word.charCodeAt(i) & 0xff);
-    wasmMem.set(bytes, 0);
-    return wasmDjb2(0, bytes.length, poolSize);
-  }
-  // Pure JS fallback (identical algorithm to hash.c)
-  let h = 5381;
-  for (let i = 0; i < word.length; i++)
-    h = (((h << 5) + h) ^ word.charCodeAt(i)) >>> 0;
-  return h % poolSize;
-}
-
-// ═══════════════════════════════════════════════════════
-//  UNKNOWN WORD POOL  (400 unique cat sounds)
-//  Every unknown English word hashes to exactly ONE sound.
-//  No chaining, no letter-by-letter encoding — one word,
-//  one clean cat sound. Covers the full emotional range.
-// ═══════════════════════════════════════════════════════
-const UNKNOWN_POOL = [
-  'Mew',  'Prrt',  'Mrrp',  'Purr',
-  'Trill',  'Sniff',  'Chirp',  'Mrr',
-  'Nyow',  'Prrp',  'Brrt',  'Fwip',
-  'Tsst',  'Hff',  'Prp',  'Mip',
-  'Twip',  'Nrr',  'Frrp',  'Yip',
-  'Pip',  'Tsp',  'Whff',  'Sft',
-  'Prk',  'Mf',  'Pft',  'Tsk',
-  'Hmp',  'Sqk',  'Meow',  'Mrrph',
-  'Mrrow',  'Mrowl',  'Nyaow',  'Chirrow',
-  'Mreow',  'Trrll',  'Snrrow',  'Prrow',
-  'Brrp',  'Grrow',  'Yowl',  'Wrrow',
-  'Trrow',  'Nrrow',  'Flrrow',  'Blrrow',
-  'Crrow',  'Skrrow',  'Drrow',  'Thrrow',
-  'Sprrow',  'Clrrow',  'Frrrow',  'Glrrow',
-  'Plrrow',  'Slrrow',  'Strrow',  'Swrrow',
-  'Mrrrow',  'Purrrr',  'Mrrooow',  'Meoow',
-  'Maoow',  'Nyaaow',  'Mrowwl',  'Churrow',
-  'Prrrrow',  'Trrowl',  'Yoowl',  'Wroowl',
-  'Groowl',  'Broowl',  'Snoowl',  'Floowl',
-  'Bloowl',  'Clrowl',  'Srowl',  'Kroowl',
-  'Throowl',  'Sproowwl',  'Froowl',  'Gloowl',
-  'Ploowl',  'Sloowl',  'Stroowl',  'Swoowl',
-  'Droowl',  'Sproowwl~',  'MEOW',  'MROWRR',
-  'HISS',  'NYAOW',  'CHIRP',  'MRRROW',
-  'MRROW',  'MRRP',  'HISSS',  'TRILL',
-  'YOWL',  'GROWL',  'MROWL',  'SNARF',
-  'CHRRP',  'MREOW',  'WROWL',  'GROWR',
-  'BRRROW',  'SCREECH',  'SNARR',  'YOWRR',
-  'GRROWL',  'MROWWL',  'HISSRR',  'CLROWL',
-  'THROWL',  'SPROWL',  'FROWL',  'GROWWL',
-  'Mew~',  'Purr~',  'Mrrp~',  'Trill~',
-  'Mrrrow~',  'Mrrph~',  'Mrowl~',  'Nyaow~',
-  'Mreow~',  'Yowl~',  'Meow~',  'Chirp~',
-  'Mrrow~',  'Maoow~',  'Hiss~',  'Sniff~',
-  'Grrow~',  'Trrow~',  'Brrow~',  'Wrrow~',
-  'Frrp~',  'Brrpt~',  'Snrrp~',  'Clrrp~',
-  'Trrpt~',  'Wrrp~',  'Grrpt~',  'Drrp~',
-  'Zrrp~',  'Mrrup~',  'Mew!',  'Prrt!',
-  'Mrrp!',  'Chirp!',  'MEOW!',  'Mrrrow!',
-  'MROWRR!',  'Nyaow!',  'Mrowl!',  'HISS!',
-  'Meow!',  'Purr!',  'Sniff!',  'Yowl!',
-  'Grrow!',  'Trill!',  'Mrrow!',  'Mreow!',
-  'Maoow!',  'Brrow!',  'Frrp!',  'Brrpt!',
-  'Snrrp!',  'Clrrp!',  'Trrpt!',  'Wrrp!',
-  'Grrpt!',  'Drrp!',  'Mrrup!',  'Zrrp!',
-  'Mew.',  'Prrt.',  'Mrrp.',  'Purr.',
-  'Mrrrow.',  'Mrrph.',  'Hiss.',  'Mrowl.',
-  'Nyaow.',  'MEOW.',  'Meow.',  'Chirp.',
-  'Mrrow.',  'Maoow.',  'Grrow.',  'Trill.',
-  'Yowl.',  'Mreow.',  'Sniff.',  'Wrrow.',
-  'Frrp.',  'Brrpt.',  'Snrrp.',  'Clrrp.',
-  'Trrpt.',  'Wrrp.',  'Grrpt.',  'Drrp.',
-  'Mrrup.',  'Zrrp.',  'Mew-mew',  'Prrt-prrt',
-  'Chirp-mew',  'Mrrp-mew',  'Purr-mew',  'Hiss-mew',
-  'Trill-mew',  'Mrow-mew',  'Nyow-mew',  'Sniff-mew',
-  'Mrrph-mew',  'Mrrrow-mew',  'Mrowl-mew',  'Nyaow-mew',
-  'Mreow-mew',  'Meow-mew',  'Mew-prrt',  'Mew-mrrp',
-  'Mew-purr',  'Mew-chirp',  'Mew-hiss',  'Prrt-mew',
-  'Mrrp-prrt',  'Purr-prrt',  'Chirp-prrt',  'Hiss-prrt',
-  'Nom-mew',  'Nom-prrt',  'Nom-chirp',  'Nom-purr',
-  'Nom-mrrp',  'Nom-nom',  'Mrrrow-prrt',  'Mrowl-prrt',
-  'Nyaow-prrt',  'Mreow-prrt',  'Mew-mrrrow',  'Prrt-mrrrow',
-  'Chirp-mrrrow',  'Mrrp-mrrrow',  'Chirp chirp',  'Mew mew',
-  'Prrt prrt',  'Purr purr',  'Mrrp mrrp',  'Hiss hiss',
-  'Meow meow',  'Mrrrow mew',  'Nyaow mew',  'Chirp mrrp',
-  'Mrrph mew',  'Mrowl mew',  'Trill mew',  'Sniff mrrp',
-  'Mrrrow mrr',  'Meow mrrp',  'Mew mew mew',  'Chirp chirp!',
-  'MEOW MEOW',  'HISS HISS',  'Purr purr~',  'Mew mew!',
-  'MROWRR HISS',  'Chirp mew!',  'Mrrrow mrrp',  'Nyaow mrrp',
-  'Mreow mew',  'Maoow mew',  'Sniff mew~',  'Nom mew~',
-  'Purr mew~',  'Trill mew~',  'Mrrup',  'Brrpt',
-  'Snrrp',  'Clrrp',  'Trrpt',  'Wrrp',
-  'Grrpt',  'Drrp',  'Zrrp',  'Phrrt',
-  'Thrrp',  'Strrt',  'Sprrt',  'Shrrt',
-  'Skrrt',  'Brrrp',  'Grrrp',  'Drrrp',
-  'Frrrp',  'Krrrp',  'Trrrp',  'Wrrrp',
-  'Snrrrp',  'Clrrrp',  'Blrrrp',  'Slrrrp',
-  'Flrrrp',  'Plrrrp',  'Glrrrp',  'Splrrt',
-  'Purrrr~',  'Mrrooow~',  'NYAOW~',  'Hisssss',
-  'Mrrrowl',  'Nyaaow~',  'Mrowww',  'Purrr',
-  'Meooow',  'Mrroow',  'Chirrp',  'Snifff',
-  'Trillll',  'Yowwl',  'Growwl',  'Mewww',
-  'Prrrt',  'Mrrpt',  'Purrrr!',  'Chirrrp',
-  'Hissss',  'Mrrroww',  'Nyaoww',  'Mrowll',
-  'Mreoww',  'Yowww',  'Growww',  'Meowww',
-  'Maooww',  'Snifff~',  'Mew?',  'Mrrow?',
-  'Mrrp?',  'Chirp?',  'Mrrrow?',  'Nyaow?',
-  'Mrowl?',  'Meow?',  'Purr?',  'Hiss?',
-  'Sniff?',  'Trill?',  'Mreow?',  'Yowl?',
-  'Grrow?',  'Maoow?',  'Prrt?',  'Brrp?',
-  'Wrrow?',  'Trrow?',  'Meeew',  'Meeeow',
-  'Mrrrrow',  'Purrrow',  'Trrrll',  'Nyaaaw',
-  'Mrowwl~',  'Chirrrrp',  'Mrrroow',  'Puurrr',
-  'Maoooow',  'Nyaooow',  'Mrowwwl',  'Chirrrow',
-  'Mrrrph',  'Meooow~',  'Purrr~',  'Mrrroww~',
-  'Meoooow',  'Nyaooow~',  'Mrrp!~',  'Mew!~',
-  'MRRP!',  'MEW!',  'PRRT!',  'CHIRP!~',
-  'NYOW!',  'PURR!',  'TRILL!',  'SNIFF!',
-  'Mrrp?!',  'Mew?!',  'Mrroww?!',  'Chirp?!',
-  'Nyaow?!',  'MEOW?',  'HISS?',  'MROWL?',
-  'NYAOW?',  'CHIRP?',
-];
-
-// Verify no duplicates at startup
-(function checkPool() {
-  const s = new Set(UNKNOWN_POOL);
-  if (s.size !== UNKNOWN_POOL.length) {
-    const seen = {};
-    UNKNOWN_POOL.forEach((v,i) => { if(seen[v] !== undefined) {} else seen[v]=i; });
-  }
-})();
-
-// ── Session maps for unknown word round-trips ──────────
-const sessionFwd = {};   // clean english → cat sound
-const sessionRev = {};   // cat sound key → clean english
-
-function soundKey(s) { return s.toLowerCase().replace(/[^a-z\-!?.~ ]/g,'').trim(); }
-
-function getUnknownSound(word) {
-  const clean = word.toLowerCase().replace(/[^a-z']/g,'');
-  if (!clean) return 'Mrrp';
-  if (sessionFwd[clean]) return sessionFwd[clean];
-
-  const idx = djb2Hash(clean, UNKNOWN_POOL.length);
-  let sound = UNKNOWN_POOL[idx];
-
-  // Collision: try neighbours
-  let offset = 0;
-  while (sessionRev[soundKey(sound)] && sessionRev[soundKey(sound)] !== clean) {
-    offset++;
-    if (offset >= UNKNOWN_POOL.length) { sound = clean + '-mew'; break; }
-    sound = UNKNOWN_POOL[(idx + offset) % UNKNOWN_POOL.length];
-  }
-
-  sessionFwd[clean] = sound;
-  sessionRev[soundKey(sound)] = clean;
-  return sound;
-}
-
-function lookupUnknownRev(catSound) {
-  return sessionRev[soundKey(catSound)] || null;
-}
-
-// ── Utility ───────────────────────────────────────────
+// ── Stormy vowel extension ────────────────────────────────────────
 function toStormy(w) {
-  return w.replace(/([oOaAeEiIuUrR~]+)/g, m => m + m[Math.floor(m.length/2)].repeat(4));
+  return w.replace(/([aeiouAEIOU]+)/g, m => m + m[Math.floor(m.length / 2)].repeat(4));
 }
-function censorWord(w) {
+
+// ── Censor curse words ───────────────────────────────────────────
+function censor(w) {
   return w.length <= 1 ? '*' : w[0] + '*'.repeat(w.length - 1);
 }
 
-const COLOR_WORDS = new Set([
+// ── Pass-through sets (colours and numbers) ──────────────────────
+const COLORS = new Set([
   'red','orange','yellow','green','blue','purple','pink','brown','black',
   'white','gray','grey','cyan','magenta','maroon','navy','teal','indigo',
   'violet','gold','silver','beige','tan','cream','lavender','lime','coral',
   'salmon','turquoise','crimson','scarlet','amber','ivory','bronze','copper',
 ]);
-const NUMBER_WORDS = new Set([
+const NUMBERS = new Set([
   'zero','one','two','three','four','five','six','seven','eight','nine','ten',
   'eleven','twelve','thirteen','fourteen','fifteen','sixteen','seventeen',
   'eighteen','nineteen','twenty','thirty','forty','fifty','sixty','seventy',
   'eighty','ninety','hundred','thousand','million','billion',
 ]);
-function isPassthrough(token) {
-  if (/^\d[\d.,]*$/.test(token)) return true;
-  const l = token.toLowerCase();
-  return COLOR_WORDS.has(l) || NUMBER_WORDS.has(l);
+function isPassthrough(t) {
+  if (/^\d[\d.,]*$/.test(t)) return true;
+  const l = t.toLowerCase();
+  return COLORS.has(l) || NUMBERS.has(l);
 }
 
-function tokenize(text) {
-  return text.split(/(\s+|[,.!?;:'"()\-])/).filter(t => t != null && t !== '');
+// ════════════════════════════════════════════════════════════════
+//  UNKNOWN WORD POOL — 200 unique letter-only cat sounds
+//  djb2 hashes an unknown word → slot in this pool.
+//  One word → one clean sound. No composition, no chaining.
+// ════════════════════════════════════════════════════════════════
+const POOL = [
+  'Mip', 'Pip', 'Prp', 'Fwip', 'Yip',
+  'Tsst', 'Hff', 'Brrt', 'Prrp', 'Tsp',
+  'Whff', 'Sft', 'Prk', 'Pft', 'Sqk',
+  'Nrr', 'Frrp', 'Brrp', 'Grrt', 'Drrt',
+  'Mew', 'Meow', 'Purr', 'Trill', 'Chirp',
+  'Mrrow', 'Mrrrow', 'Mrrph', 'Nyaow', 'Mrowl',
+  'Prrt', 'Mrrp', 'Nyow', 'Mrr', 'Sniff',
+  'Nom', 'Yowl', 'Brrow', 'Mreow', 'Prrow',
+  'Meww', 'Meoww', 'Purrw', 'Trillw', 'Chirpw',
+  'Mrroww', 'Mrrroww', 'Mrrphw', 'Nyaoww', 'Mrowlw',
+  'Prrtw', 'Mrrpw', 'Nyoww', 'Mrrw', 'Sniffw',
+  'Nomw', 'Yowlw', 'Brroww', 'Mreoww', 'Prroww',
+  'Mewrr', 'Meowrr', 'Purrrr', 'Trillrr', 'Chirprr',
+  'Mrrowrr', 'Mrrrowrr', 'Mrrphrr', 'Nyaowrr', 'Mrowlrr',
+  'Prrtrr', 'Mrrprr', 'Nyowrr', 'Mrrrr', 'Sniffrr',
+  'Nomrr', 'Yowlrr', 'Brrowrr', 'Mreowrr', 'Prrowrr',
+  'Mewph', 'Meowph', 'Purrph', 'Trillph', 'Chirpph',
+  'Mrrowph', 'Mrrrowph', 'Mrrphph', 'Nyaowph', 'Mrowlph',
+  'Prrtph', 'Mrrpph', 'Nyowph', 'Mrrphww', 'Sniffph',
+  'Nomph', 'Yowlph', 'Brrowph', 'Mreowph', 'Prrowph',
+  'Mewll', 'Meowll', 'Purrll', 'Trilll', 'Chirpll',
+  'Mrrowll', 'Mrrrowll', 'Mrrphll', 'Nyaowll', 'Mrowlll',
+  'Prrtll', 'Mrrpll', 'Nyowll', 'Mrrll', 'Sniffll',
+  'Nomll', 'Yowlll', 'Brrowll', 'Mreowll', 'Prrowll',
+  'Mewmm', 'Meowmm', 'Purrmm', 'Trillmm', 'Chirpmm',
+  'Mrrowmm', 'Mrrrowmm', 'Mrrphmm', 'Nyaowmm', 'Mrowlmm',
+  'Prrtmm', 'Mrrpmm', 'Nyowmm', 'Mrrmm', 'Sniffmm',
+  'Nommm', 'Yowlmm', 'Brrowmm', 'Mreowmm', 'Prrowmm',
+  'Mrrooow', 'Mrroooow', 'Mrrooooww', 'Nyaaow', 'Mrowwl',
+  'Purrrrr', 'Purrrrmm', 'Purrrrll', 'Purrrrph', 'Purrrrww',
+  'Mrrrowww', 'Mrrrowwph', 'Mrrrowwll', 'Mrrrowwmm', 'Mrrrowwrr',
+  'Meooow', 'Meoooow', 'Nyaaaow', 'Mrowwwl', 'Chirrrp',
+  'MEOW', 'MROWRR', 'HISS', 'NYAOW', 'CHIRP',
+  'MRRROW', 'MRROW', 'MRRP', 'TRILL', 'YOWL',
+  'GROWL', 'MROWL', 'SCREECH', 'SNARF', 'CHRRP',
+  'MREOW', 'WROWL', 'GROWR', 'BRRROW', 'SNRRL',
+  'Nom nom', 'Mew mew', 'Chirp chirp', 'Prrt prrt', 'Purr purr',
+  'Hiss hiss', 'Sniff mew', 'Nom mew', 'Chirp mew', 'Mrrrow mew',
+  'Nyaow mew', 'Meow mew', 'Mrrph mew', 'Mrowl mew', 'Trill mew',
+  'Sniff meww', 'Nom meww', 'Chirp meww', 'Purr mew', 'Hiss mew',
+];
+
+// Verify pool uniqueness
+const _ps = new Set(POOL);
+if (_ps.size !== POOL.length) {
+  console.warn('Worker: pool has', POOL.length - _ps.size, 'duplicate entries');
 }
 
-// ── Build reverse lookup maps ──────────────────────────
-// Sorted longest-sound-first for greedy multi-token matching
-function buildFastMap(entries) {
+// ── djb2 hash (pure JS — same algorithm as hash.c) ───────────────
+function djb2(word) {
+  let h = 5381;
+  for (let i = 0; i < word.length; i++)
+    h = (((h << 5) + h) ^ word.charCodeAt(i)) >>> 0;
+  return h;
+}
+
+// ── Levenshtein edit distance (pure JS — same as hash.c lev()) ───
+// Used for fuzzy reverse translation matching.
+function lev(a, b) {
+  const m = a.length, n = b.length;
+  let prev = Array.from({length: n + 1}, (_, i) => i);
+  let curr = new Array(n + 1);
+  for (let i = 0; i < m; i++) {
+    curr[0] = i + 1;
+    for (let j = 0; j < n; j++) {
+      const cost = a[i] === b[j] ? 0 : 1;
+      curr[j + 1] = Math.min(curr[j] + 1, prev[j + 1] + 1, prev[j] + cost);
+    }
+    [prev, curr] = [curr, prev];
+  }
+  return prev[n];
+}
+
+// ── Session maps: unknown word ↔ cat sound ───────────────────────
+const fwd = {};   // clean english → cat sound
+const rev = {};   // normalised cat sound → clean english
+
+function normKey(s) { return s.toLowerCase().replace(/[^a-z ]/g, '').trim(); }
+
+function unknownSound(word) {
+  const clean = word.toLowerCase().replace(/[^a-z']/g, '');
+  if (!clean) return 'Mrrp';
+  if (fwd[clean]) return fwd[clean];
+  const idx = djb2(clean) % POOL.length;
+  let sound = POOL[idx];
+  let offset = 0;
+  while (rev[normKey(sound)] && rev[normKey(sound)] !== clean) {
+    offset++;
+    if (offset >= POOL.length) { sound = clean + 'mew'; break; }
+    sound = POOL[(idx + offset) % POOL.length];
+  }
+  fwd[clean] = sound;
+  rev[normKey(sound)] = clean;
+  return sound;
+}
+
+function recoverUnknown(catSound) {
+  return rev[normKey(catSound)] || null;
+}
+
+// ════════════════════════════════════════════════════════════════
+//  CAPITALISATION HELPERS
+//  Match the capitalisation pattern of the input cat token
+//  and apply it to the output English word.
+// ════════════════════════════════════════════════════════════════
+function capPattern(token) {
+  if (token === token.toUpperCase() && /[A-Z]/.test(token)) return 'upper';
+  if (/^[A-Z]/.test(token)) return 'title';
+  return 'lower';
+}
+
+function applyCapPattern(pattern, word) {
+  if (!word) return word;
+  if (pattern === 'upper') return word.toUpperCase();
+  if (pattern === 'title') return word[0].toUpperCase() + word.slice(1).toLowerCase();
+  return word.toLowerCase();
+}
+
+// ════════════════════════════════════════════════════════════════
+//  BUILD REVERSE LOOKUP MAPS
+//  Maps normalised cat sound → { eng, label } for reverse translation.
+//  Sorted longest-first so greedy multi-token matching works correctly.
+// ════════════════════════════════════════════════════════════════
+function buildRevMap(entries) {
   const map = {};
+  // Sort longest key first so greedy takes "Nom mew" before "Nom"
+  entries.sort((a, b) => b.key.length - a.key.length);
   for (const e of entries) {
-    const k = soundKey(e.sound);
-    if (k && !map[k]) map[k] = e;
+    if (e.key && !map[e.key]) map[e.key] = e;
   }
   return map;
 }
 
-function buildCatMap() {
-  const entries = [];
-  for (const [eng, entry] of Object.entries(catDict))
-    entries.push({ sound: entry.cat, eng, label: null });
-  return buildFastMap(entries);
+const catRevMap = buildRevMap(
+  Object.entries(catDict).map(([eng, v]) => ({
+    key: normKey(v.cat), eng, label: null
+  }))
+);
+
+const stormyRevMap = buildRevMap([
+  ...Object.entries(stormySpecial).map(([eng, v]) => ({
+    key: normKey(v.stormy), eng, label: v.label
+  })),
+  ...Object.entries(catDict).map(([eng, v]) => ({
+    key: normKey(toStormy(v.cat)), eng, label: null
+  })),
+]);
+
+// ════════════════════════════════════════════════════════════════
+//  TRANSLATION FUNCTIONS
+// ════════════════════════════════════════════════════════════════
+
+function tokenise(text) {
+  return text.split(/(\s+|[,.!?;:'"()\-])/).filter(t => t != null && t !== '');
 }
 
-function buildStormyMap() {
-  const entries = [];
-  for (const [eng, entry] of Object.entries(stormySpecial))
-    entries.push({ sound: entry.stormy, eng, label: entry.label });
-  for (const [eng, entry] of Object.entries(catDict))
-    entries.push({ sound: toStormy(entry.cat), eng, label: null });
-  return buildFastMap(entries);
-}
-
-const catMap    = buildCatMap();
-const stormyMap = buildStormyMap();
-
-// ── English → Cat ──────────────────────────────────────
-// Every known word maps to EXACTLY ONE cat sound. No randomness.
-function translateToCat(text) {
+// ── English → Cat (deterministic, one word = one sound) ──────────
+function toCat(text) {
   const result = [];
-  for (const token of tokenize(text)) {
-    if (/^\s+$/.test(token)) { result.push({type:'space',value:token}); continue; }
-    if (/^[,.!?;:'"()\-]+$/.test(token)) { result.push({type:'punct',value:token}); continue; }
-    if (isPassthrough(token)) { result.push({type:'passthrough',value:token}); continue; }
-    const clean = token.toLowerCase().replace(/[^a-z']/g,'');
+  for (const tok of tokenise(text)) {
+    if (/^\s+$/.test(tok)) { result.push({type:'space', v:tok}); continue; }
+    if (/^[,.!?;:'"()\-]+$/.test(tok)) { result.push({type:'punct', v:tok}); continue; }
+    if (isPassthrough(tok)) { result.push({type:'pass', v:tok}); continue; }
+    const clean = tok.toLowerCase().replace(/[^a-z']/g, '');
     const entry = catDict[clean];
-    if (entry) {
-      result.push({type:'word', mode:'cat', value:entry.cat, confidence:'high'});
-    } else {
-      result.push({type:'word', mode:'cat', value:getUnknownSound(clean||token), confidence:'low'});
-    }
+    const sound = entry ? entry.cat : unknownSound(clean || tok);
+    result.push({type:'word', mode:'cat', conf: entry ? 'high' : 'low', v: sound});
   }
   return result;
 }
 
-// ── English → Stormy ───────────────────────────────────
-function translateToStormy(text) {
+// ── English → Stormy ─────────────────────────────────────────────
+function toStormyTranslate(text) {
   const result = [];
-  for (const token of tokenize(text)) {
-    if (/^\s+$/.test(token)) { result.push({type:'space',value:token}); continue; }
-    if (/^[,.!?;:'"()\-]+$/.test(token)) { result.push({type:'punct',value:token}); continue; }
-    if (isPassthrough(token)) { result.push({type:'passthrough',value:token}); continue; }
-    const clean = token.toLowerCase().replace(/[^a-z']/g,'');
+  for (const tok of tokenise(text)) {
+    if (/^\s+$/.test(tok)) { result.push({type:'space', v:tok}); continue; }
+    if (/^[,.!?;:'"()\-]+$/.test(tok)) { result.push({type:'punct', v:tok}); continue; }
+    if (isPassthrough(tok)) { result.push({type:'pass', v:tok}); continue; }
+    const clean = tok.toLowerCase().replace(/[^a-z']/g, '');
     if (stormySpecial[clean]) {
       const s = stormySpecial[clean];
-      result.push({type:'word', mode:'stormy-special', value:s.stormy, label:s.label, confidence:'high'});
+      result.push({type:'word', mode:'stormy-special', label:s.label, conf:'high', v:s.stormy});
       continue;
     }
     const entry = catDict[clean];
-    if (entry) {
-      result.push({type:'word', mode:'stormy', value:toStormy(entry.cat), confidence:'high'});
-    } else {
-      result.push({type:'word', mode:'stormy', value:toStormy(getUnknownSound(clean||token)), confidence:'low'});
-    }
+    const base  = entry ? entry.cat : unknownSound(clean || tok);
+    result.push({type:'word', mode:'stormy', conf: entry ? 'high' : 'low', v: toStormy(base)});
   }
   return result;
 }
 
-// ── Cat/Stormy → English (greedy longest-first match) ──
-function translateFrom(text, map) {
+// ── Cat/Stormy → English ──────────────────────────────────────────
+// Greedy longest-match with Levenshtein fuzzy fallback (threshold 2).
+function fromCat(text, map) {
   const words = text.trim().split(/\s+/).filter(Boolean);
   const result = [];
   let i = 0;
+
   while (i < words.length) {
+    // Record cap pattern of first token in this chunk
+    const inputCap = capPattern(words[i]);
     let matched = false;
+
+    // Try 4, 3, 2, 1 tokens (longest first)
     for (let len = Math.min(4, words.length - i); len >= 1; len--) {
-      const chunk = words.slice(i, i+len).join(' ');
-      const entry = map[soundKey(chunk)];
+      const chunk = words.slice(i, i + len).join(' ');
+      const key   = normKey(chunk);
+      const entry = map[key];
       if (entry) {
         const isCurse = entry.label === 'curse';
-        result.push({
-          type:'word',
-          mode: entry.label ? 'stormy-special' : 'normal',
-          label: entry.label,
-          value: isCurse ? censorWord(entry.eng) : entry.eng,
-          confidence:'high'
-        });
+        const raw     = isCurse ? censor(entry.eng) : entry.eng;
+        const display = applyCapPattern(inputCap, raw);
+        result.push({type:'word', mode: entry.label ? 'stormy-special' : 'normal',
+                     label: entry.label, conf:'high', v: display});
         i += len; matched = true; break;
       }
     }
+
     if (!matched) {
-      const recovered = lookupUnknownRev(words[i]);
-      result.push(recovered
-        ? {type:'word', mode:'recovered', value:recovered, confidence:'high'}
-        : {type:'word', mode:'normal',    value:words[i],  confidence:'low'}
-      );
+      // Check session map (unknown round-trip)
+      const recovered = recoverUnknown(words[i]);
+      if (recovered) {
+        result.push({type:'word', mode:'recovered', conf:'high',
+                     v: applyCapPattern(inputCap, recovered)});
+        i++; matched = true;
+      }
+    }
+
+    if (!matched) {
+      // Levenshtein fuzzy match (max distance 2)
+      const key = normKey(words[i]);
+      let bestEntry = null, bestDist = Infinity;
+      for (const [mKey, mEntry] of Object.entries(map)) {
+        const d = lev(key, mKey);
+        if (d < bestDist && d <= 2) { bestDist = d; bestEntry = mEntry; }
+      }
+      if (bestEntry) {
+        const isCurse = bestEntry.label === 'curse';
+        const raw     = isCurse ? censor(bestEntry.eng) : bestEntry.eng;
+        result.push({type:'word', mode:'fuzzy', conf:'low',
+                     v: applyCapPattern(inputCap, raw)});
+      } else {
+        result.push({type:'word', mode:'unknown', conf:'low', v: words[i]});
+      }
       i++;
     }
-    if (i < words.length) result.push({type:'space', value:' '});
+
+    if (i < words.length) result.push({type:'space', v:' '});
   }
   return result;
 }
 
-// ── Render tokens → HTML ───────────────────────────────
-function renderTokens(tokens, direction) {
+// ════════════════════════════════════════════════════════════════
+//  RENDER TOKENS → HTML
+// ════════════════════════════════════════════════════════════════
+function render(tokens, dir) {
   let html = '';
   for (const tok of tokens) {
-    if (tok.type === 'space')       { html += ' '; continue; }
-    if (tok.type === 'punct')       { html += tok.value; continue; }
-    if (tok.type === 'passthrough') { html += `<span class="col-pass">${tok.value}</span>`; continue; }
+    if (tok.type === 'space') { html += ' '; continue; }
+    if (tok.type === 'punct') { html += tok.v; continue; }
+    if (tok.type === 'pass')  { html += `<span class="col-pass">${tok.v}</span>`; continue; }
 
-    if (direction === 'to-cat') {
-      html += `<span class="${tok.confidence==='low'?'col-low':'col-cat'}">${tok.value}</span>`;
+    if (dir === 'to-cat') {
+      html += `<span class="${tok.conf === 'low' ? 'col-low' : 'col-cat'}">${tok.v}</span>`;
 
-    } else if (direction === 'to-stormy') {
-      if (tok.confidence === 'low') {
-        html += `<span class="col-low">${tok.value}</span>`;
+    } else if (dir === 'to-stormy') {
+      if (tok.conf === 'low') {
+        html += `<span class="col-low">${tok.v}</span>`;
       } else if (tok.mode === 'stormy-special') {
-        const cls = tok.label==='curse' ? 'col-curse' : tok.label==='intense' ? 'col-intense' : 'col-vocab';
-        html += `<span class="${cls}">${tok.value}</span>`;
+        const cls = tok.label === 'curse'   ? 'col-curse'
+                  : tok.label === 'intense' ? 'col-intense' : 'col-vocab';
+        html += `<span class="${cls}">${tok.v}</span>`;
       } else {
-        html += `<span class="col-stormy">${tok.value}</span>`;
+        html += `<span class="col-stormy">${tok.v}</span>`;
       }
 
     } else {
-      if (tok.confidence === 'low') {
-        html += `<span class="col-low">${tok.value}</span>`;
-      } else if (tok.mode === 'stormy-special') {
-        const cls = tok.label==='curse' ? 'col-curse' : tok.label==='intense' ? 'col-intense' : 'col-vocab';
-        html += `<span class="${cls}">${tok.value}</span>`;
+      // Reverse direction
+      if (tok.mode === 'stormy-special') {
+        const cls = tok.label === 'curse'   ? 'col-curse'
+                  : tok.label === 'intense' ? 'col-intense' : 'col-vocab';
+        html += `<span class="${cls}">${tok.v}</span>`;
+      } else if (tok.conf === 'low') {
+        html += `<span class="col-low">${tok.v}</span>`;
       } else {
-        html += `<span class="col-cat">${tok.value}</span>`;
+        html += `<span class="col-cat">${tok.v}</span>`;
       }
     }
   }
   return html;
 }
 
-// ── Message handler ────────────────────────────────────
+// ── Message handler ───────────────────────────────────────────────
 self.onmessage = function(e) {
   const { id, type, text } = e.data;
   let tokens;
-  if      (type === 'to-cat')      tokens = translateToCat(text);
-  else if (type === 'to-stormy')   tokens = translateToStormy(text);
-  else if (type === 'from-cat')    tokens = translateFrom(text, catMap);
-  else if (type === 'from-stormy') tokens = translateFrom(text, stormyMap);
-  else { self.postMessage({ id, html:'' }); return; }
-  self.postMessage({ id, html: renderTokens(tokens, type) });
+  if      (type === 'to-cat')      tokens = toCat(text);
+  else if (type === 'to-stormy')   tokens = toStormyTranslate(text);
+  else if (type === 'from-cat')    tokens = fromCat(text, catRevMap);
+  else if (type === 'from-stormy') tokens = fromCat(text, stormyRevMap);
+  else { self.postMessage({id, html:''}); return; }
+  self.postMessage({id, html: render(tokens, type)});
 };
