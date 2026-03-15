@@ -12,7 +12,34 @@ const COPY_CONFIRM_MS = 1500;
 
 const PLACEHOLDER_HTML = '<span class="output-placeholder">Translation appears here\u2026</span>';
 const TRANSLATING_HTML = '<span class="translating-msg">Translating\u2026</span>';
-const ERROR_HTML       = '<span class="col-low">Translation error \u2014 check console.</span>';
+// Error codes — keep in sync with error.html ERROR_CATALOGUE
+const ERRORS = {
+  WORKER_FAILED:  'CT-100',
+  WORKER_TIMEOUT: 'CT-101',
+  WORKER_CRASH:   'CT-102',
+  DICT_MISSING:   'CT-200',
+  TRANS_FAILED:   'CT-300',
+  INPUT_LONG:     'CT-400',
+  INPUT_EMPTY:    'CT-401',
+  LOAD_FAIL:      'CT-500',
+  UNKNOWN:        'CT-900',
+};
+
+function makeErrorHTML(code, hint) {
+  var labels = {
+    'CT-100':'Worker failed to start','CT-101':'Worker timed out',
+    'CT-102':'Worker crashed','CT-200':'Dictionary not loaded',
+    'CT-300':'Translation failed','CT-400':'Input too long',
+    'CT-401':'Empty input','CT-500':'Script load error','CT-900':'Unknown error',
+  };
+  var h = hint ? '<div class="error-hint">' + hint + '</div>' : '';
+  return '<div class="error-notice">' +
+    '<div class="error-code">' + code + '</div>' +
+    '<div class="error-message">' + (labels[code] || 'Error') + '</div>' + h +
+    '<div class="error-hint" style="margin-top:0.4rem">' +
+    '<a href="error.html?code=' + code + '" style="color:var(--curse);text-decoration:underline">More info</a>' +
+    '</div></div>';
+}
 
 // ── Utilities ─────────────────────────────────────────────────────────────
 function countWords(text) {
@@ -74,7 +101,9 @@ function initBridge(onReady) {
     };
     w.onerror = function(err) {
       console.warn('[CT] Worker error:', err.message || err);
-      useWorker = false; workerObj = null; onReady();
+      useWorker = false; workerObj = null;
+      // Don't redirect — fall back to direct mode silently
+      onReady();
     };
     // Ping the worker; if it responds we know it loaded dictionary correctly
     const testId = ++reqCounter;
@@ -83,7 +112,7 @@ function initBridge(onReady) {
     setTimeout(function() {
       if (pendingReqs[testId]) {
         delete pendingReqs[testId];
-        console.warn('[CT] Worker timeout, using direct mode');
+        console.warn('[CT] Worker timeout (CT-101), switching to direct mode');
         useWorker = false; workerObj = null;
         try { w.terminate(); } catch(e2) {}
         onReady();
@@ -108,7 +137,7 @@ function ask(type, text, lang, toneLevel) {
       Promise.resolve().then(function() {
         try {
           const eng = window._catEngine;
-          if (!eng) { resolve({ html: ERROR_HTML, confHTML: '', confidence: 0 }); return; }
+          if (!eng) { resolve({ html: makeErrorHTML(ERRORS.DICT_MISSING, 'dictionary.js may not have loaded'), confHTML: '', confidence: 0 }); return; }
 
           if (type === 'random') {
             resolve({ text: eng.getRandomPhrase(lang || 'cat') }); return;
@@ -121,7 +150,8 @@ function ask(type, text, lang, toneLevel) {
           resolve({ html: result.html, confHTML, confidence: result.confidence });
         } catch (err) {
           console.error('[CT] Direct translate error:', err);
-          resolve({ html: ERROR_HTML, confHTML: '', confidence: 0 });
+          var code = err.message && err.message.includes('dict') ? ERRORS.DICT_MISSING : ERRORS.TRANS_FAILED;
+          resolve({ html: makeErrorHTML(code, err.message), confHTML: '', confidence: 0 });
         }
       });
     }
@@ -282,7 +312,8 @@ document.addEventListener('DOMContentLoaded', function() {
     try {
       result = await ask(cfg.dir, text, cfg.randomLang, tone);
     } catch (e) {
-      result = { html: ERROR_HTML, confHTML: '', confidence: 0 };
+      console.error('[CT] doTranslate error:', e);
+      result = { html: makeErrorHTML(ERRORS.TRANS_FAILED, e.message), confHTML: '', confidence: 0 };
     }
 
     clearTimeout(indicator);
@@ -463,5 +494,9 @@ document.addEventListener('DOMContentLoaded', function() {
   });
 
   // ── Init ──────────────────────────────────────────────────────────────────
-  initBridge(function() { setMode('en-cat'); });
+  initBridge(function() {
+    setMode('en-cat');
+    // Signal loading screen to dismiss
+    if (typeof window._onTranslatorReady === 'function') window._onTranslatorReady();
+  });
 });
