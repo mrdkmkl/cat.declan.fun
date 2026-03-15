@@ -136,6 +136,42 @@
       body:  'The page fonts could not load. This is cosmetic only — the translator will still work, but text may look different.',
       hint:  'Fonts are loaded from Google Fonts. Check your internet connection.',
     },
+    'CT-402': {
+      cat:   '😾',
+      title: 'Too Many Characters for One Word',
+      body:  'A single word in your input exceeds the 34-character limit. The translator cannot process words that long — try breaking it up or removing it.',
+      hint:  'Max 34 characters per word. Spaces reset the count.',
+    },
+    'CT-403': {
+      cat:   '🙄',
+      title: 'Unreadable Input',
+      body:  'The input contains only symbols, numbers, or whitespace with no translatable content.',
+      hint:  'Type real words — letters only work best.',
+    },
+    'CT-404': {
+      cat:   '😼',
+      title: 'Invalid Tone Level',
+      body:  'The tone level was outside the valid range. Cat accepts 1–3, Stormy accepts 1–5. The translator reset it to default.',
+      hint:  'This is usually caused by a browser extension interfering with the slider.',
+    },
+    'CT-405': {
+      cat:   '😿',
+      title: 'Clipboard Error',
+      body:  'The browser denied access to the clipboard. This often happens when the page is not served over HTTPS, or clipboard permissions are blocked.',
+      hint:  'You can still select the output text manually and copy with Ctrl+C.',
+    },
+    'CT-501': {
+      cat:   '😿',
+      title: 'Random Phrase Failed',
+      body:  'The random phrase generator could not produce a phrase. The phrase cache may not have been built yet.',
+      hint:  'Try switching to Cat → English or Stormy → English mode first, then click Random again.',
+    },
+    'CT-502': {
+      cat:   '😼',
+      title: 'Swap Failed',
+      body:  'The swap direction could not be determined from the current mode.',
+      hint:  'Try selecting a mode manually using the buttons above the translator.',
+    },
     'CT-900': {
       cat:   '🙀',
       title: 'Unknown Error',
