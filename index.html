@@ -47,6 +47,47 @@
           <div class="pane-lang" id="left-label"><strong>English</strong></div>
           <div class="pane-header-right">
             <span class="word-counter" id="word-counter" style="display:none">0 / 100</span>
+
+            <!-- Cat tone button + popup -->
+            <div class="tone-wrap" id="tone-wrap-cat">
+              <button class="tone-btn cat-tone-btn" id="tone-btn-cat" title="Adjust tone" style="display:none">tone</button>
+              <div class="tone-popup" id="tone-popup-cat">
+                <div class="tone-popup-header">
+                  <span class="tone-popup-title">Cat Tone</span>
+                  <button class="tone-popup-close" title="Close">✕</button>
+                </div>
+                <div class="tone-popup-body">
+                  <div class="tone-levels">
+                    <span class="tone-level-label">Normal</span>
+                    <span class="tone-level-label">Very Loud</span>
+                  </div>
+                  <input type="range" id="tone-slider-cat" class="tone-slider" min="1" max="3" step="1" value="1" />
+                  <div class="tone-current" id="tone-label-cat">Normal</div>
+                  <div class="tone-desc">3 levels: Normal → Louder → Very Loud</div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Stormy tone button + popup -->
+            <div class="tone-wrap" id="tone-wrap-stormy">
+              <button class="tone-btn stormy-tone-btn" id="tone-btn-stormy" title="Adjust tone" style="display:none">tone</button>
+              <div class="tone-popup" id="tone-popup-stormy">
+                <div class="tone-popup-header">
+                  <span class="tone-popup-title">Stormy Tone</span>
+                  <button class="tone-popup-close" title="Close">✕</button>
+                </div>
+                <div class="tone-popup-body">
+                  <div class="tone-levels">
+                    <span class="tone-level-label">Whisper</span>
+                    <span class="tone-level-label">Maximum</span>
+                  </div>
+                  <input type="range" id="tone-slider-stormy" class="tone-slider" min="1" max="5" step="1" value="3" />
+                  <div class="tone-current" id="tone-label-stormy">Normal</div>
+                  <div class="tone-desc">5 levels: Whisper ← Normal → Maximum</div>
+                </div>
+              </div>
+            </div>
+
             <button class="random-btn" id="random-btn" style="display:none">random</button>
             <button class="clear-btn" id="clear-btn">clear</button>
           </div>
@@ -111,6 +152,7 @@
   <script src="dictionary.js"></script>
   <script src="worker.js"></script>
   <script src="translator.js"></script>
+
 
   <footer class="site-footer">made by <a href="https://youtube.com/@mrdkmkl" target="_blank">@mrdkmkl</a></footer>
 </body>
