@@ -179,7 +179,7 @@ header {
 
 .pane-output {
   flex: 1;
-  padding: 1.2rem 1.5rem;
+  padding: 1.2rem 1.5rem 2rem;
   font-size: 0.88rem;
   line-height: 1.9;
   overflow-y: auto;
@@ -670,9 +670,7 @@ header {
 
 /* ── Hover tooltip cursor on translated words ── */
 .pane-output [title] {
-  cursor: help;
-  border-bottom: 1px dotted currentColor;
-  text-decoration: none;
+  cursor: default;
 }
 
 /* ════════════════════════════════════════════════════════
