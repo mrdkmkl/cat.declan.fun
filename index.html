@@ -10,6 +10,15 @@
 </head>
 <body>
 
+  <!-- ── Loading screen ── -->
+  <div id="loading-screen">
+    <div class="loading-logo">Cat <span>Translator</span></div>
+    <div class="loading-dots">
+      <span></span><span></span><span></span>
+    </div>
+    <div class="loading-status" id="loading-status">Loading…</div>
+  </div>
+
   <!-- ── Header ── -->
   <header>
     <div class="logo">Cat <span>Translator</span></div>
@@ -150,11 +159,38 @@
   </div>
 
   <!-- Scripts: dictionary first, then translator logic -->
-  <script src="dictionary.js"></script>
-  <script src="worker.js"></script>
-  <script src="translator.js"></script>
+  <script src="dictionary.js" onerror="window.location.href='error.html?code=CT-500&context=dictionary.js'"></script>
+  <script src="worker.js"     onerror="console.warn('[CT] worker.js load failed, direct mode only')"></script>
+  <script src="translator.js" onerror="window.location.href='error.html?code=CT-500&context=translator.js'"></script>
 
 
   <footer class="site-footer">made by <a href="https://github.com/mrdkmkl" target="_blank">@mrdkmkl</a></footer>
+
+  <script>
+    // Loading screen — dismiss once dictionary + worker ready
+    (function() {
+      var screen = document.getElementById('loading-screen');
+      var status = document.getElementById('loading-status');
+      var phases = ['Loading…', 'Building dictionary…', 'Starting engine…'];
+      var pi = 0;
+      var interval = setInterval(function() {
+        pi = (pi + 1) % phases.length;
+        if (status) status.textContent = phases[pi];
+      }, 600);
+      // Listen for the bridge ready signal from translator.js
+      window._onTranslatorReady = function() {
+        clearInterval(interval);
+        if (status) status.textContent = 'Ready';
+        setTimeout(function() {
+          if (screen) screen.classList.add('hidden');
+        }, 300);
+      };
+      // Fallback: hide after 3s no matter what
+      setTimeout(function() {
+        clearInterval(interval);
+        if (screen) screen.classList.add('hidden');
+      }, 3000);
+    })();
+  </script>
 </body>
 </html>
