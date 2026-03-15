@@ -100,7 +100,7 @@ function ask(type, text, lang) {
     if (useWorker && workerObj) {
       const id = ++reqCounter;
       pendingReqs[id] = resolve;
-      workerObj.postMessage({ id, type, text, lang });
+      workerObj.postMessage({ id, type, text, lang, toneLevel: extra || undefined });
     } else {
       setTimeout(function() {
         try {
@@ -109,9 +109,10 @@ function ask(type, text, lang) {
           if (type === 'random') {
             resolve({ text: eng.getRandomPhrase(lang || 'cat') }); return;
           }
-          const result = eng.doTranslateWithMeta
-            ? eng.doTranslateWithMeta(type, text)
-            : { html: eng.doTranslate(type, text), confidence: 1.0, label: 'confident' };
+          const tl = toneLevel || undefined;
+          const result = eng.doTranslate
+            ? eng.doTranslate(type, text, tl)
+            : { html: '', confidence: 1.0, label: 'confident' };
           const confHTML = (type === 'from-cat' || type === 'from-stormy') && eng.buildConfidenceHTML
             ? eng.buildConfidenceHTML(result.confidence, result.label)
             : '';
@@ -137,12 +138,25 @@ document.addEventListener('DOMContentLoaded', function() {
   const modeBtns  = document.querySelectorAll('.mode-btn');
   const counterEl = document.getElementById('word-counter');
   const clearBtn  = document.getElementById('clear-btn');
+  const toneBtnCat    = document.getElementById('tone-btn-cat');
+  const toneBtnStormy = document.getElementById('tone-btn-stormy');
+  const tonePopupCat    = document.getElementById('tone-popup-cat');
+  const tonePopupStormy = document.getElementById('tone-popup-stormy');
+  const toneSliderCat    = document.getElementById('tone-slider-cat');
+  const toneSliderStormy = document.getElementById('tone-slider-stormy');
+  const toneLabelCat     = document.getElementById('tone-label-cat');
+  const toneLabelStormy  = document.getElementById('tone-label-stormy');
+
+  const CAT_TONE_LABELS    = ['','Normal','Louder','Very Loud'];
+  const STORMY_TONE_LABELS = ['','Whisper','Quiet','Normal','Intense','Maximum'];
   const copyBtn   = document.getElementById('copy-btn');
   const swapBtn   = document.getElementById('swap-btn');
   const randBtn   = document.getElementById('random-btn');
 
   let currentMode = 'en-cat';
   let debounceTimer, latestReqId = 0;
+  let catToneLevel    = 1; // 1-3, default 1 (normal)
+  let stormyToneLevel = 3; // 1-5, default 3 (normal)
 
   // ── Counter ────────────────────────────────────────────────────────────
   function updateCounter() {
@@ -175,6 +189,12 @@ document.addEventListener('DOMContentLoaded', function() {
     // Hide confidence bar when switching to forward mode
     if (confEl) confEl.innerHTML = '';
     updateCounter();
+    // Show correct tone button
+    if (toneBtnCat)    toneBtnCat.style.display    = (cfg.group === 'cat'    && cfg.dir.startsWith('to')) ? 'inline' : 'none';
+    if (toneBtnStormy) toneBtnStormy.style.display = (cfg.group === 'stormy' && cfg.dir.startsWith('to')) ? 'inline' : 'none';
+    // Close any open popups
+    if (tonePopupCat)    tonePopupCat.classList.remove('open');
+    if (tonePopupStormy) tonePopupStormy.classList.remove('open');
     scheduleTranslate();
   }
 
@@ -231,6 +251,12 @@ document.addEventListener('DOMContentLoaded', function() {
     const cfg = MODES[currentMode];
     if (cfg.hasLimit) enforceWordLimit(inputEl);
     updateCounter();
+    // Show correct tone button
+    if (toneBtnCat)    toneBtnCat.style.display    = (cfg.group === 'cat'    && cfg.dir.startsWith('to')) ? 'inline' : 'none';
+    if (toneBtnStormy) toneBtnStormy.style.display = (cfg.group === 'stormy' && cfg.dir.startsWith('to')) ? 'inline' : 'none';
+    // Close any open popups
+    if (tonePopupCat)    tonePopupCat.classList.remove('open');
+    if (tonePopupStormy) tonePopupStormy.classList.remove('open');
     scheduleTranslate();
   });
 
@@ -270,6 +296,54 @@ document.addEventListener('DOMContentLoaded', function() {
       if (cfg.hasLimit) enforceWordLimit(inputEl);
       updateCounter(); doTranslate();
     }
+  });
+
+  // Tone button events
+  function updateToneLabel(slider, labelEl, labels) {
+    if (labelEl) labelEl.textContent = labels[parseInt(slider.value)] || '';
+  }
+  if (toneBtnCat) {
+    toneBtnCat.addEventListener('click', function(e) {
+      e.stopPropagation();
+      if (tonePopupCat) tonePopupCat.classList.toggle('open');
+      if (tonePopupStormy) tonePopupStormy.classList.remove('open');
+    });
+  }
+  if (toneBtnStormy) {
+    toneBtnStormy.addEventListener('click', function(e) {
+      e.stopPropagation();
+      if (tonePopupStormy) tonePopupStormy.classList.toggle('open');
+      if (tonePopupCat) tonePopupCat.classList.remove('open');
+    });
+  }
+  if (toneSliderCat) {
+    toneSliderCat.addEventListener('input', function() {
+      catToneLevel = parseInt(this.value);
+      updateToneLabel(this, toneLabelCat, CAT_TONE_LABELS);
+      scheduleTranslate();
+    });
+    updateToneLabel(toneSliderCat, toneLabelCat, CAT_TONE_LABELS);
+  }
+  if (toneSliderStormy) {
+    toneSliderStormy.addEventListener('input', function() {
+      stormyToneLevel = parseInt(this.value);
+      updateToneLabel(this, toneLabelStormy, STORMY_TONE_LABELS);
+      scheduleTranslate();
+    });
+    updateToneLabel(toneSliderStormy, toneLabelStormy, STORMY_TONE_LABELS);
+  }
+  // Close popups when clicking outside
+  document.addEventListener('click', function() {
+    if (tonePopupCat)    tonePopupCat.classList.remove('open');
+    if (tonePopupStormy) tonePopupStormy.classList.remove('open');
+  });
+  // Close buttons inside popups
+  document.querySelectorAll('.tone-popup-close').forEach(function(btn) {
+    btn.addEventListener('click', function(e) {
+      e.stopPropagation();
+      if (tonePopupCat)    tonePopupCat.classList.remove('open');
+      if (tonePopupStormy) tonePopupStormy.classList.remove('open');
+    });
   });
 
   initBridge(function() { setMode('en-cat'); });
