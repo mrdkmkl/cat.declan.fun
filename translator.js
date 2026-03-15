@@ -1,31 +1,28 @@
 // ─────────────────────────────────────────────────────
-//  translator.js — UI shell
-//  All translation logic lives in worker.js (Web Worker).
-//  The worker runs WASM (hash.c compiled) for fast unknown
-//  word hashing, and handles all cat/stormy translation.
+//  translator.js — UI shell only
+//  All translation logic lives in worker.js
 // ─────────────────────────────────────────────────────
 
 const WORD_LIMIT = 100;
 
-function countWords(text) {
-  return text.trim().split(/\s+/).filter(w => w.replace(/[^a-zA-Z']/g,'').length > 0).length;
+function countWords(t) {
+  return t.trim().split(/\s+/).filter(w => w.replace(/[^a-zA-Z']/g,'').length > 0).length;
 }
 
-document.addEventListener('DOMContentLoaded', function () {
+document.addEventListener('DOMContentLoaded', () => {
 
-  // ── Start the Web Worker ────────────────────────────
-  const worker = new Worker('worker.js');
-  let reqId = 0;
-  let debounce = null;
-  const pending = {};
+  // ── Start worker ─────────────────────────────────
+  const worker  = new Worker('worker.js');
+  let   reqId   = 0;
+  let   pending = {};
+  let   debounce;
 
-  worker.onmessage = function(e) {
+  worker.onmessage = e => {
     const { id, html } = e.data;
     if (pending[id]) { pending[id](html); delete pending[id]; }
   };
-
-  worker.onerror = function(e) {
-    outputEl.innerHTML = '<span class="col-low">Worker error — check console</span>';
+  worker.onerror = () => {
+    outputEl.innerHTML = '<span class="col-low">Worker error — reload the page</span>';
   };
 
   function ask(type, text) {
@@ -36,23 +33,29 @@ document.addEventListener('DOMContentLoaded', function () {
     });
   }
 
-  // ── Mode config ──────────────────────────────────────
+  // ── Mode config ───────────────────────────────────
   let mode = 'en-cat';
 
   const MODES = {
     'en-cat':    { left:'English', right:'<strong>Cat</strong>',
-                   ph:'Type in English… (max 100 words)', dir:'to-cat',      group:'cat',    limit:true  },
+                   ph:'Type in English\u2026 (max 100 words)',
+                   dir:'to-cat',      group:'cat',    limit:true  },
     'en-stormy': { left:'English', right:'<strong>Stormy</strong><span class="stormy-label-badge">extended</span>',
-                   ph:'Type in English… (max 100 words)', dir:'to-stormy',   group:'stormy', limit:true  },
+                   ph:'Type in English\u2026 (max 100 words)',
+                   dir:'to-stormy',   group:'stormy', limit:true  },
     'cat-en':    { left:'Cat',     right:'<strong>English</strong>',
-                   ph:'Type Cat words…',                  dir:'from-cat',    group:'cat',    limit:false },
+                   ph:'Type Cat words\u2026',
+                   dir:'from-cat',    group:'cat',    limit:false },
     'stormy-en': { left:'Stormy',  right:'<strong>English</strong>',
-                   ph:'Type Stormy words…',               dir:'from-stormy', group:'stormy', limit:false },
+                   ph:'Type Stormy words\u2026',
+                   dir:'from-stormy', group:'stormy', limit:false },
+  };
+  const SWAP = {
+    'en-cat':'cat-en', 'cat-en':'en-cat',
+    'en-stormy':'stormy-en', 'stormy-en':'en-stormy',
   };
 
-  const SWAP = { 'en-cat':'cat-en','cat-en':'en-cat','en-stormy':'stormy-en','stormy-en':'en-stormy' };
-
-  // ── DOM refs ─────────────────────────────────────────
+  // ── DOM ───────────────────────────────────────────
   const inputEl  = document.getElementById('input-text');
   const outputEl = document.getElementById('output-area');
   const leftLbl  = document.getElementById('left-label');
@@ -60,13 +63,13 @@ document.addEventListener('DOMContentLoaded', function () {
   const modeBtns = document.querySelectorAll('.mode-btn');
   const counter  = document.getElementById('word-counter');
 
-  const PLACEHOLDER = '<span class="output-placeholder">Translation appears here…</span>';
-  const TRANSLATING  = '<span class="translating-msg">Translating…</span>';
+  const PLACEHOLDER = '<span class="output-placeholder">Translation appears here\u2026</span>';
+  const TRANSLATING = '<span class="translating-msg">Translating\u2026</span>';
 
-  // ── Word counter ────────────────────────────────────
+  // ── Word counter ──────────────────────────────────
   function updateCounter() {
     const cfg = MODES[mode];
-    if (!cfg.limit) { counter.style.display='none'; return; }
+    if (!cfg.limit) { counter.style.display = 'none'; return; }
     counter.style.display = 'inline';
     const n = countWords(inputEl.value);
     counter.textContent = n + ' / ' + WORD_LIMIT;
@@ -76,40 +79,45 @@ document.addEventListener('DOMContentLoaded', function () {
   function enforceLimit() {
     if (!MODES[mode].limit) return;
     const chunks = inputEl.value.trim().split(/(\s+)/);
-    let count=0, cut=inputEl.value.length, pos=0;
+    let count = 0, cut = inputEl.value.length, pos = 0;
     for (const c of chunks) {
-      if (c.replace(/[^a-zA-Z']/g,'').length>0) { count++; if (count>WORD_LIMIT) { cut=pos; break; } }
+      if (c.replace(/[^a-zA-Z']/g,'').length > 0) {
+        count++;
+        if (count > WORD_LIMIT) { cut = pos; break; }
+      }
       pos += c.length;
     }
     if (count > WORD_LIMIT) inputEl.value = inputEl.value.slice(0, cut).trimEnd();
   }
 
-  // ── Set mode ─────────────────────────────────────────
+  // ── Set mode ──────────────────────────────────────
   function setMode(m) {
     mode = m;
     const cfg = MODES[m];
-    leftLbl.innerHTML  = '<strong>'+cfg.left+'</strong>';
-    rightLbl.innerHTML = cfg.right;
+    leftLbl.innerHTML   = '<strong>' + cfg.left + '</strong>';
+    rightLbl.innerHTML  = cfg.right;
     inputEl.placeholder = cfg.ph;
     modeBtns.forEach(btn => {
       const on = btn.dataset.mode === m;
       btn.classList.toggle('active', on);
-      btn.classList.remove('cat-mode','stormy-mode');
-      if (on) btn.classList.add(cfg.group==='stormy' ? 'stormy-mode' : 'cat-mode');
+      btn.classList.remove('cat-mode', 'stormy-mode');
+      if (on) btn.classList.add(cfg.group === 'stormy' ? 'stormy-mode' : 'cat-mode');
     });
     updateCounter();
     doTranslate();
   }
 
-  // ── Translate ────────────────────────────────────────
+  // ── Translate ─────────────────────────────────────
   let latestReq = 0;
 
   async function doTranslate() {
     const text = inputEl.value.trim();
     if (!text) { outputEl.innerHTML = PLACEHOLDER; return; }
     const myReq = ++latestReq;
-    // Show "Translating…" only if worker takes >100ms
-    const t = setTimeout(() => { if (latestReq===myReq) outputEl.innerHTML = TRANSLATING; }, 100);
+    // Show "Translating…" only if worker takes more than 120ms
+    const t = setTimeout(() => {
+      if (latestReq === myReq) outputEl.innerHTML = TRANSLATING;
+    }, 120);
     const html = await ask(MODES[mode].dir, text);
     clearTimeout(t);
     if (latestReq === myReq) outputEl.innerHTML = html || PLACEHOLDER;
@@ -120,8 +128,13 @@ document.addEventListener('DOMContentLoaded', function () {
     debounce = setTimeout(doTranslate, 60);
   }
 
-  // ── Events ────────────────────────────────────────────
-  inputEl.addEventListener('input', () => { enforceLimit(); updateCounter(); schedule(); });
+  // ── Events ────────────────────────────────────────
+  inputEl.addEventListener('input', () => {
+    enforceLimit();
+    updateCounter();
+    schedule();
+  });
+
   modeBtns.forEach(b => b.addEventListener('click', () => setMode(b.dataset.mode)));
 
   document.getElementById('clear-btn').addEventListener('click', () => {
@@ -132,20 +145,24 @@ document.addEventListener('DOMContentLoaded', function () {
   });
 
   document.getElementById('copy-btn').addEventListener('click', () => {
-    navigator.clipboard.writeText(outputEl.innerText.replace(/\s+/g,' ').trim()).then(() => {
+    navigator.clipboard.writeText(
+      outputEl.innerText.replace(/\s+/g,' ').trim()
+    ).then(() => {
       const btn = document.getElementById('copy-btn');
       btn.textContent = 'copied!';
       btn.classList.add('copied');
-      setTimeout(() => { btn.textContent='copy'; btn.classList.remove('copied'); }, 1500);
+      setTimeout(() => { btn.textContent = 'copy'; btn.classList.remove('copied'); }, 1500);
     });
   });
 
   document.getElementById('swap-btn').addEventListener('click', () => {
     const out = outputEl.innerText.replace(/\s+/g,' ').trim();
     setMode(SWAP[mode]);
-    if (out && out !== 'Translation appears here…' && out !== 'Translating…') {
+    if (out && out !== 'Translation appears here\u2026' && out !== 'Translating\u2026') {
       inputEl.value = out;
-      enforceLimit(); updateCounter(); doTranslate();
+      enforceLimit();
+      updateCounter();
+      doTranslate();
     }
   });
 
