@@ -443,3 +443,17 @@ header {
 .site-footer a:hover {
   color: var(--text);
 }
+
+/* ── Translating indicator ── */
+.translating-msg {
+  color: var(--muted);
+  font-style: italic;
+  font-size: 0.82rem;
+  letter-spacing: 0.04em;
+  animation: blink-fade 0.9s ease-in-out infinite;
+}
+
+@keyframes blink-fade {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0.35; }
+}
