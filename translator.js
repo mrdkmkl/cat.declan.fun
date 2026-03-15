@@ -1,195 +1,123 @@
 // ════════════════════════════════════════════════════════════════════════
-//  translator.js — Cat Translator UI
-//
-//  Handles all user interface logic. Translation is delegated to worker.js
-//  which runs either as a Web Worker (preferred, background thread) or
-//  directly as a loaded script (fallback, for file:// protocol).
-//
-//  The fallback ensures the translator works when opened directly from the
-//  filesystem without a local server.
-//
-//  Flow:
-//    1. Try to start a Web Worker running worker.js
-//    2. If Worker fails (file:// protocol, browser restriction, etc.),
-//       fall back to calling window._catEngine.doTranslate() directly
-//    3. Either way the UI is identical — debounced input, live translation,
-//       "Translating…" indicator for slow responses, word counter, swap, copy
+//  translator.js — Cat Translator UI  v5.0
+//  Connects UI to the worker engine.
+//  New in v5: random phrase button, confidence bar, word segmenter support.
 // ════════════════════════════════════════════════════════════════════════
 
-// ── Constants ────────────────────────────────────────────────────────────
-const WORD_LIMIT       = 100;
-const DEBOUNCE_MS      = 60;
-const TRANSLATING_MS   = 120;  // show "Translating…" after this many ms
-const COPY_CONFIRM_MS  = 1500;
+const WORD_LIMIT      = 100;
+const DEBOUNCE_MS     = 60;
+const TRANSLATING_MS  = 120;
+const COPY_CONFIRM_MS = 1500;
 
-// ── Placeholder HTML ─────────────────────────────────────────────────────
-const PLACEHOLDER_HTML  = '<span class="output-placeholder">Translation appears here\u2026</span>';
-const TRANSLATING_HTML  = '<span class="translating-msg">Translating\u2026</span>';
-const ERROR_HTML        = '<span class="col-low">Could not translate. Reload the page.</span>';
+const PLACEHOLDER_HTML = '<span class="output-placeholder">Translation appears here\u2026</span>';
+const TRANSLATING_HTML = '<span class="translating-msg">Translating\u2026</span>';
+const ERROR_HTML       = '<span class="col-low">Error \u2014 reload the page.</span>';
 
-// ════════════════════════════════════════════════════════════════════════
-//  WORD COUNTER UTILITY
-//  Counts real words (letter-containing tokens) in a string.
-// ════════════════════════════════════════════════════════════════════════
+// ── Word count ────────────────────────────────────────────────────────────
 function countWords(text) {
   if (!text || !text.trim()) return 0;
-  return text.trim()
-    .split(/\s+/)
-    .filter(w => w.replace(/[^a-zA-Z']/g, '').length > 0)
-    .length;
+  return text.trim().split(/\s+/).filter(w => w.replace(/[^a-zA-Z']/g,'').length > 0).length;
 }
 
-// ════════════════════════════════════════════════════════════════════════
-//  WORD LIMIT ENFORCER
-//  Hard-caps the textarea at WORD_LIMIT words by truncating at the
-//  exact position where the limit is exceeded.
-// ════════════════════════════════════════════════════════════════════════
-function enforceWordLimit(inputEl) {
-  const val    = inputEl.value;
-  const chunks = val.trim().split(/(\s+)/);
-  let   count  = 0;
-  let   cutPos = val.length;
-  let   charPos= 0;
-
-  for (const chunk of chunks) {
-    const isWord = chunk.replace(/[^a-zA-Z']/g, '').length > 0;
-    if (isWord) {
-      count++;
-      if (count > WORD_LIMIT) {
-        cutPos = charPos;
-        break;
-      }
+// ── Enforce word limit ────────────────────────────────────────────────────
+function enforceWordLimit(el) {
+  const chunks = el.value.trim().split(/(\s+)/);
+  let count = 0, pos = 0, cut = el.value.length;
+  for (const c of chunks) {
+    if (c.replace(/[^a-zA-Z']/g,'').length > 0) {
+      if (++count > WORD_LIMIT) { cut = pos; break; }
     }
-    charPos += chunk.length;
+    pos += c.length;
   }
-  if (count > WORD_LIMIT) {
-    inputEl.value = val.slice(0, cutPos).trimEnd();
-  }
+  if (count > WORD_LIMIT) el.value = el.value.slice(0, cut).trimEnd();
 }
 
 // ════════════════════════════════════════════════════════════════════════
-//  MODE CONFIGURATION
-//  Each mode describes the left pane language, right pane label,
-//  input placeholder, translation direction, button group, and whether
-//  the word limit applies.
+//  MODE CONFIG
 // ════════════════════════════════════════════════════════════════════════
 const MODES = {
   'en-cat': {
-    leftLang:  'English',
+    leftLang: 'English',
     rightHTML: '<strong>Cat</strong>',
-    placeholder: 'Type in English\u2026 (max 100 words)',
-    dir:       'to-cat',
-    group:     'cat',
-    hasLimit:  true,
+    ph: 'Type in English\u2026 (max 100 words)',
+    dir: 'to-cat', group: 'cat', hasLimit: true, showRandom: false, randomLang: null,
   },
   'en-stormy': {
-    leftLang:  'English',
+    leftLang: 'English',
     rightHTML: '<strong>Stormy</strong><span class="stormy-label-badge">extended</span>',
-    placeholder: 'Type in English\u2026 (max 100 words)',
-    dir:       'to-stormy',
-    group:     'stormy',
-    hasLimit:  true,
+    ph: 'Type in English\u2026 (max 100 words)',
+    dir: 'to-stormy', group: 'stormy', hasLimit: true, showRandom: false, randomLang: null,
   },
   'cat-en': {
-    leftLang:  'Cat',
+    leftLang: 'Cat',
     rightHTML: '<strong>English</strong>',
-    placeholder: 'Type Cat words\u2026',
-    dir:       'from-cat',
-    group:     'cat',
-    hasLimit:  false,
+    ph: 'Type Cat words\u2026 or press Random',
+    dir: 'from-cat', group: 'cat', hasLimit: false, showRandom: true, randomLang: 'cat',
   },
   'stormy-en': {
-    leftLang:  'Stormy',
+    leftLang: 'Stormy',
     rightHTML: '<strong>English</strong>',
-    placeholder: 'Type Stormy words\u2026',
-    dir:       'from-stormy',
-    group:     'stormy',
-    hasLimit:  false,
+    ph: 'Type Stormy words\u2026 or press Random',
+    dir: 'from-stormy', group: 'stormy', hasLimit: false, showRandom: true, randomLang: 'stormy',
   },
 };
-
 const SWAP_MAP = {
-  'en-cat':    'cat-en',
-  'cat-en':    'en-cat',
-  'en-stormy': 'stormy-en',
-  'stormy-en': 'en-stormy',
+  'en-cat':'cat-en','cat-en':'en-cat','en-stormy':'stormy-en','stormy-en':'en-stormy',
 };
 
 // ════════════════════════════════════════════════════════════════════════
-//  TRANSLATION BRIDGE
-//  Abstracts over Worker vs direct-call so the rest of the UI code
-//  doesn't need to know which mode is active.
+//  WORKER BRIDGE
 // ════════════════════════════════════════════════════════════════════════
-let useWorker  = false;
-let workerObj  = null;
-let pendingReqs= {};
+let useWorker = false, workerObj = null;
+const pendingReqs = {};
 let reqCounter = 0;
 
 function initBridge(onReady) {
-  // Try Web Worker first
   try {
     const w = new Worker('worker.js');
     w.onmessage = function(e) {
-      const { id, html } = e.data;
-      if (pendingReqs[id]) {
-        pendingReqs[id](html);
-        delete pendingReqs[id];
-      }
+      const { id, html, confHTML, confidence, text } = e.data;
+      if (pendingReqs[id]) { pendingReqs[id]({ html, confHTML, confidence, text }); delete pendingReqs[id]; }
     };
-    w.onerror = function(err) {
-      console.warn('[CatTranslator] Worker error, switching to direct mode:', err.message);
-      useWorker = false;
-      workerObj = null;
-      onReady();
+    w.onerror = function() {
+      useWorker = false; workerObj = null; onReady();
     };
-    // Send a test message — if it comes back, worker is running
     const testId = ++reqCounter;
-    pendingReqs[testId] = function(html) {
-      // Test succeeded: worker is alive
-      useWorker = true;
-      workerObj = w;
-      onReady();
-    };
+    pendingReqs[testId] = function() { useWorker = true; workerObj = w; onReady(); };
     w.postMessage({ id: testId, type: 'to-cat', text: 'hello' });
-    // Timeout fallback: if worker doesn't respond in 2s, use direct mode
     setTimeout(function() {
       if (pendingReqs[testId]) {
-        delete pendingReqs[testId];
-        console.warn('[CatTranslator] Worker timeout, using direct mode');
-        useWorker = false;
-        workerObj = null;
-        w.terminate();
+        delete pendingReqs[testId]; useWorker = false; workerObj = null;
+        try { w.terminate(); } catch(e) {}
         onReady();
       }
     }, 2000);
-  } catch (e) {
-    // Worker not supported (file:// protocol, etc.)
-    console.warn('[CatTranslator] Worker unavailable, using direct mode:', e.message);
-    useWorker = false;
-    workerObj = null;
-    onReady();
-  }
+  } catch(e) { useWorker = false; workerObj = null; onReady(); }
 }
 
-function askTranslate(type, text) {
+function ask(type, text, lang) {
   return new Promise(function(resolve) {
     if (useWorker && workerObj) {
       const id = ++reqCounter;
       pendingReqs[id] = resolve;
-      workerObj.postMessage({ id, type, text });
+      workerObj.postMessage({ id, type, text, lang });
     } else {
-      // Direct mode: call engine synchronously (or micro-async via Promise)
       setTimeout(function() {
         try {
-          // window._catEngine is set by worker.js when loaded as a script
-          if (window._catEngine) {
-            resolve(window._catEngine.doTranslate(type, text));
-          } else {
-            resolve(ERROR_HTML);
+          const eng = window._catEngine;
+          if (!eng) { resolve({ html: ERROR_HTML, confHTML: '', confidence: 0 }); return; }
+          if (type === 'random') {
+            resolve({ text: eng.getRandomPhrase(lang || 'cat') }); return;
           }
+          const result = eng.doTranslateWithMeta
+            ? eng.doTranslateWithMeta(type, text)
+            : { html: eng.doTranslate(type, text), confidence: 1.0, label: 'confident' };
+          const confHTML = (type === 'from-cat' || type === 'from-stormy') && eng.buildConfidenceHTML
+            ? eng.buildConfidenceHTML(result.confidence, result.label)
+            : '';
+          resolve({ html: result.html, confHTML, confidence: result.confidence });
         } catch(err) {
-          console.error('[CatTranslator] Direct translate error:', err);
-          resolve(ERROR_HTML);
+          resolve({ html: ERROR_HTML, confHTML: '', confidence: 0 });
         }
       }, 0);
     }
@@ -198,13 +126,12 @@ function askTranslate(type, text) {
 
 // ════════════════════════════════════════════════════════════════════════
 //  UI CONTROLLER
-//  All DOM interaction lives here.
 // ════════════════════════════════════════════════════════════════════════
 document.addEventListener('DOMContentLoaded', function() {
 
-  // ── DOM refs ──────────────────────────────────────────────────────────
   const inputEl   = document.getElementById('input-text');
   const outputEl  = document.getElementById('output-area');
+  const confEl    = document.getElementById('conf-area');
   const leftLbl   = document.getElementById('left-label');
   const rightLbl  = document.getElementById('right-label');
   const modeBtns  = document.querySelectorAll('.mode-btn');
@@ -212,79 +139,94 @@ document.addEventListener('DOMContentLoaded', function() {
   const clearBtn  = document.getElementById('clear-btn');
   const copyBtn   = document.getElementById('copy-btn');
   const swapBtn   = document.getElementById('swap-btn');
+  const randBtn   = document.getElementById('random-btn');
 
-  // ── State ─────────────────────────────────────────────────────────────
   let currentMode = 'en-cat';
-  let debounceTimer;
-  let latestReqId = 0;
+  let debounceTimer, latestReqId = 0;
 
-  // ── Word counter update ───────────────────────────────────────────────
+  // ── Counter ────────────────────────────────────────────────────────────
   function updateCounter() {
     const cfg = MODES[currentMode];
-    if (!cfg.hasLimit) {
-      counterEl.style.display = 'none';
-      return;
-    }
+    if (!cfg.hasLimit) { counterEl.style.display = 'none'; return; }
     counterEl.style.display = 'inline';
     const n = countWords(inputEl.value);
     counterEl.textContent = n + ' / ' + WORD_LIMIT;
     counterEl.classList.toggle('over-limit', n > WORD_LIMIT);
   }
 
-  // ── Set active mode ───────────────────────────────────────────────────
+  // ── Set mode ────────────────────────────────────────────────────────────
   function setMode(mode) {
     currentMode = mode;
-    const cfg   = MODES[mode];
+    const cfg = MODES[mode];
     leftLbl.innerHTML   = '<strong>' + cfg.leftLang + '</strong>';
     rightLbl.innerHTML  = cfg.rightHTML;
-    inputEl.placeholder = cfg.placeholder;
+    inputEl.placeholder = cfg.ph;
     modeBtns.forEach(function(btn) {
-      const active = btn.dataset.mode === mode;
-      btn.classList.toggle('active', active);
-      btn.classList.remove('cat-mode', 'stormy-mode');
-      if (active) {
-        btn.classList.add(cfg.group === 'stormy' ? 'stormy-mode' : 'cat-mode');
-      }
+      const on = btn.dataset.mode === mode;
+      btn.classList.toggle('active', on);
+      btn.classList.remove('cat-mode','stormy-mode');
+      if (on) btn.classList.add(cfg.group === 'stormy' ? 'stormy-mode' : 'cat-mode');
     });
+    // Show/hide random button
+    if (randBtn) {
+      randBtn.style.display = cfg.showRandom ? 'inline' : 'none';
+      randBtn.className = 'random-btn' + (cfg.group === 'stormy' ? ' stormy-mode' : '');
+    }
+    // Hide confidence bar when switching to forward mode
+    if (confEl) confEl.innerHTML = '';
     updateCounter();
     scheduleTranslate();
   }
 
-  // ── Core translate call ───────────────────────────────────────────────
+  // ── Main translate ─────────────────────────────────────────────────────
   async function doTranslate() {
     const text = inputEl.value.trim();
-    if (!text) {
-      outputEl.innerHTML = PLACEHOLDER_HTML;
-      return;
-    }
+    if (!text) { outputEl.innerHTML = PLACEHOLDER_HTML; if (confEl) confEl.innerHTML = ''; return; }
     const myId = ++latestReqId;
     const cfg  = MODES[currentMode];
-    // Show "Translating…" indicator if worker is slow
     const indicator = setTimeout(function() {
-      if (latestReqId === myId) {
-        outputEl.innerHTML = TRANSLATING_HTML;
-      }
+      if (latestReqId === myId) outputEl.innerHTML = TRANSLATING_HTML;
     }, TRANSLATING_MS);
-    let html;
-    try {
-      html = await askTranslate(cfg.dir, text);
-    } catch (err) {
-      html = ERROR_HTML;
-    }
+    let result;
+    try { result = await ask(cfg.dir, text); }
+    catch(e) { result = { html: ERROR_HTML, confHTML: '', confidence: 0 }; }
     clearTimeout(indicator);
-    // Only update if this is still the most recent request
     if (latestReqId === myId) {
-      outputEl.innerHTML = html || PLACEHOLDER_HTML;
+      outputEl.innerHTML = result.html || PLACEHOLDER_HTML;
+      // Show confidence bar only for reverse modes
+      if (confEl) {
+        confEl.innerHTML = (cfg.dir === 'from-cat' || cfg.dir === 'from-stormy')
+          ? (result.confHTML || '') : '';
+      }
     }
   }
 
-  // ── Debounced translate ───────────────────────────────────────────────
   function scheduleTranslate() {
     clearTimeout(debounceTimer);
     debounceTimer = setTimeout(doTranslate, DEBOUNCE_MS);
   }
 
-  // ── Input event ───────────────────────────────────────────────────────
+  // ── Random button ──────────────────────────────────────────────────────
+  if (randBtn) {
+    randBtn.addEventListener('click', async function() {
+      const cfg  = MODES[currentMode];
+      if (!cfg.showRandom) return;
+      randBtn.textContent = '\u231B'; // hourglass
+      randBtn.disabled = true;
+      try {
+        const result = await ask('random', '', cfg.randomLang);
+        if (result && result.text) {
+          inputEl.value = result.text;
+          updateCounter();
+          await doTranslate();
+        }
+      } catch(e) { /* ignore */ }
+      randBtn.textContent = 'random';
+      randBtn.disabled = false;
+    });
+  }
+
+  // ── Events ─────────────────────────────────────────────────────────────
   inputEl.addEventListener('input', function() {
     const cfg = MODES[currentMode];
     if (cfg.hasLimit) enforceWordLimit(inputEl);
@@ -292,78 +234,43 @@ document.addEventListener('DOMContentLoaded', function() {
     scheduleTranslate();
   });
 
-  // ── Mode buttons ──────────────────────────────────────────────────────
-  modeBtns.forEach(function(btn) {
-    btn.addEventListener('click', function() {
-      setMode(btn.dataset.mode);
-    });
-  });
-
-  // ── Clear button ──────────────────────────────────────────────────────
-  clearBtn.addEventListener('click', function() {
-    inputEl.value      = '';
-    outputEl.innerHTML = PLACEHOLDER_HTML;
-    updateCounter();
-    inputEl.focus();
-  });
-
-  // ── Copy button ───────────────────────────────────────────────────────
-  copyBtn.addEventListener('click', function() {
-    const text = outputEl.innerText.replace(/\s+/g, ' ').trim();
-    if (!text || text === 'Translation appears here\u2026' || text === 'Translating\u2026') return;
-    navigator.clipboard.writeText(text).then(function() {
-      copyBtn.textContent = 'copied!';
-      copyBtn.classList.add('copied');
-      setTimeout(function() {
-        copyBtn.textContent = 'copy';
-        copyBtn.classList.remove('copied');
-      }, COPY_CONFIRM_MS);
-    }).catch(function() {
-      // Fallback for browsers where clipboard API is unavailable
-      const ta = document.createElement('textarea');
-      ta.value = text;
-      ta.style.position = 'fixed';
-      ta.style.opacity  = '0';
-      document.body.appendChild(ta);
-      ta.select();
-      document.execCommand('copy');
-      document.body.removeChild(ta);
-      copyBtn.textContent = 'copied!';
-      copyBtn.classList.add('copied');
-      setTimeout(function() {
-        copyBtn.textContent = 'copy';
-        copyBtn.classList.remove('copied');
-      }, COPY_CONFIRM_MS);
-    });
-  });
-
-  // ── Swap button ───────────────────────────────────────────────────────
-  swapBtn.addEventListener('click', function() {
-    const currentOutput = outputEl.innerText.replace(/\s+/g, ' ').trim();
-    const targetMode    = SWAP_MAP[currentMode];
-    if (!targetMode) return;
-    setMode(targetMode);
-    const skip = ['Translation appears here\u2026', 'Translating\u2026', ''];
-    if (currentOutput && !skip.includes(currentOutput)) {
-      inputEl.value = currentOutput;
-      const cfg = MODES[targetMode];
-      if (cfg.hasLimit) enforceWordLimit(inputEl);
-      updateCounter();
-      doTranslate();
-    }
-  });
-
-  // ── Keyboard shortcut: Enter in input triggers immediate translate ────
   inputEl.addEventListener('keydown', function(e) {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      clearTimeout(debounceTimer);
-      doTranslate();
+    if (e.key === 'Enter' && !e.shiftKey) { clearTimeout(debounceTimer); doTranslate(); }
+  });
+
+  modeBtns.forEach(function(btn) {
+    btn.addEventListener('click', function() { setMode(btn.dataset.mode); });
+  });
+
+  clearBtn.addEventListener('click', function() {
+    inputEl.value = ''; outputEl.innerHTML = PLACEHOLDER_HTML;
+    if (confEl) confEl.innerHTML = '';
+    updateCounter(); inputEl.focus();
+  });
+
+  copyBtn.addEventListener('click', function() {
+    const text = outputEl.innerText.replace(/\s+/g,' ').trim();
+    if (!text || text === 'Translation appears here\u2026') return;
+    const doCopy = function() {
+      copyBtn.textContent = 'copied!'; copyBtn.classList.add('copied');
+      setTimeout(function() { copyBtn.textContent = 'copy'; copyBtn.classList.remove('copied'); }, COPY_CONFIRM_MS);
+    };
+    navigator.clipboard ? navigator.clipboard.writeText(text).then(doCopy).catch(doCopy) : doCopy();
+  });
+
+  swapBtn.addEventListener('click', function() {
+    const out    = outputEl.innerText.replace(/\s+/g,' ').trim();
+    const target = SWAP_MAP[currentMode];
+    if (!target) return;
+    setMode(target);
+    const skip = ['Translation appears here\u2026','Translating\u2026',''];
+    if (out && !skip.includes(out)) {
+      inputEl.value = out;
+      const cfg = MODES[target];
+      if (cfg.hasLimit) enforceWordLimit(inputEl);
+      updateCounter(); doTranslate();
     }
   });
 
-  // ── Initialise bridge, then set initial mode ──────────────────────────
-  initBridge(function() {
-    setMode('en-cat');
-  });
-
-}); // end DOMContentLoaded
+  initBridge(function() { setMode('en-cat'); });
+});
