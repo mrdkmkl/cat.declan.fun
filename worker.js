@@ -1078,6 +1078,13 @@ const RANDOM_EN_PHRASES_EXTRA_CAT = [
   "this is fine i am fine everything is fine give me food",
   "you moved and now i have to restart my entire nap from scratch",
   "i have brought you a gift please be grateful it took effort",
+  "the alarm is cold",
+  "big johnnnnn",
+  "frank ocean",
+  "the couch is green",
+  "could i have a glass of water",
+  "quit sleeping",
+  "get off your phone mate",
 ];
 
 const RANDOM_EN_PHRASES_EXTRA_STORMY = [
@@ -1096,6 +1103,13 @@ const RANDOM_EN_PHRASES_EXTRA_STORMY = [
   "everything is completely fine i am totally fine now please feed me",
   "you moved one millimeter and now i must restart my entire nap from scratch",
   "i have brought you a magnificent gift please appreciate this enormous effort",
+  "why are the walls cold",
+  "i see you kora",
+  "the storm is tracking northeast at 15mph, how are the temps doc",
+  "the giant horse WHAT weighs over 11 pounds",
+  "i have a phd and you dont DINGUS AHHAHAHA",
+  "how are the words worded to word the word",
+  "FRANK OCEAN",
 ];
 
 // Merge extra phrases into main banks
