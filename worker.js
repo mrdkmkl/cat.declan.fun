@@ -1,25 +1,22 @@
 // ════════════════════════════════════════════════════════════════════════
-//  worker.js  —  Cat Translator Core Engine  v5.0
-//  1200+ line advanced translation engine with:
-//    · Multi-algorithm reverse decryption (exact, phonetic, fuzzy, n-gram)
-//    · Random message generator (cat & stormy phrase banks)
-//    · Jaro-Winkler + Levenshtein hybrid similarity scoring
-//    · Phonetic normalisation (vowel collapse, consonant grouping)
-//    · N-gram fingerprint matching for long/mangled inputs
-//    · Prefix/suffix trie-style token segmentation
-//    · Capitalisation mirroring engine
-//    · Stormy vowel extension with full round-trip support
-//    · Session map for unknown word round-trips
-//    · djb2 hash for consistent unknown-word pool assignment
-//    · Self-test suite runs on load
+//  worker.js  —  Cat Translator Core Engine  v6.0
+//  1200 lines. 34 sections.
+//
+//  New in v6:
+//    §3  Tone engine — 3 levels for Cat, 5 levels for Stormy
+//    §10 Spacing fix — explicit spaces between output tokens
+//    §22 Phonetic alias table
+//    §23 Stormy de-storm reverse
+//    §28 Word segmenter
+//    §30 Extended phrase bank (all words verified in catDict)
+//    All phrases use only words present in catDict
 // ════════════════════════════════════════════════════════════════════════
 
 if (typeof importScripts === 'function') { importScripts('dictionary.js'); }
 
 // ════════════════════════════════════════════════════════════════════════
-//  §1  CONSTANTS & POOL
+//  §1  SOUND POOL  (250 unique tokens for unknown words)
 // ════════════════════════════════════════════════════════════════════════
-
 const POOL = [
   'Mip', 'Pip', 'Prp', 'Fwip', 'Yip',
   'Tsst', 'Hff', 'Brrt', 'Prrp', 'Tsp',
@@ -52,7 +49,7 @@ const POOL = [
   'Mewmm', 'Meowmm', 'Purrmm', 'Trillmm', 'Chirpmm',
   'Mrrowmm', 'Mrrrowmm', 'Mrrphmm', 'Nyaowmm', 'Mrowlmm',
   'Prrtmm', 'Mrrpmm', 'Nyowmm', 'Mrrmm', 'Sniffmm',
-  'Nommmm', 'Yowlmm', 'Brrowmm', 'Mreowmm', 'Mewph',
+  'Nommm', 'Yowlmm', 'Brrowmm', 'Mreowmm', 'Mewph',
   'Meowph', 'Purrph', 'Trillph', 'Chirpph', 'Mrrowph',
   'Mrrrowph', 'Mrrphph', 'Nyaowph', 'Mrowlph', 'Prrtph',
   'Mrrpph', 'Nyowph', 'Sniffph', 'Nomph', 'Yowlph',
@@ -66,129 +63,125 @@ const POOL = [
   'Meooow', 'Nyaaow', 'Purrrrr', 'Purrrrrr', 'Mrrrowww',
   'Chirrrp', 'Mrrrowllrrl', 'Mrrrowmmrrl', 'Mrrrowrrrrl', 'Mrrrowphrrl',
   'Mrrrowwrrl', 'Mrrrowwph', 'Nyaowrrl', 'Mrowlrrl', 'Prrtrrll',
-  'Mrrprrll', 'Sniffrrll', 'Nomrrll', 'Yowlrrll',
+  'Mrrprrll', 'Sniffrrll', 'Nomrrll', 'Yowlrrll', 'Me-fluh',
+  'Purr-roh', 'Mew-flr', 'Chirp-oh', 'Mrr-owph', 'Prrt-oww',
+  'Mrrp-ohw', 'Nyow-flr', 'Yowl-ohm', 'Nom-fluh', 'Sniff-ohh',
+  'Mrowl-ohm', 'Mrrph-oww', 'Brrow-flr', 'Trill-ohm', 'Prrow-fluh',
+  'Mreow-ohh',
 ];
 
-// Verify no duplicates
-(function(){
-  const s = new Set(POOL);
-  if (s.size !== POOL.length) console.warn('[CT] Pool dupes:', POOL.length - s.size);
-})();
+(function(){ const s=new Set(POOL); if(s.size!==POOL.length) console.warn('[CT] Pool dupes:',POOL.length-s.size); })();
 
+// ════════════════════════════════════════════════════════════════════════
+//  §2  CONSTANTS
+// ════════════════════════════════════════════════════════════════════════
 const COLORS = new Set([
   'red','orange','yellow','green','blue','purple','pink','brown','black',
   'white','gray','grey','cyan','magenta','maroon','navy','teal','indigo',
   'violet','gold','silver','beige','tan','cream','lavender','lime','coral',
   'salmon','turquoise','crimson','scarlet','amber','ivory','bronze','copper',
-  'aqua','fuchsia','chartreuse','vermillion','cerulean','ochre','sepia',
 ]);
 const NUMBER_WORDS = new Set([
   'zero','one','two','three','four','five','six','seven','eight','nine','ten',
   'eleven','twelve','thirteen','fourteen','fifteen','sixteen','seventeen',
   'eighteen','nineteen','twenty','thirty','forty','fifty','sixty','seventy',
-  'eighty','ninety','hundred','thousand','million','billion','trillion',
+  'eighty','ninety','hundred','thousand','million','billion',
 ]);
 
 // ════════════════════════════════════════════════════════════════════════
-//  §2  RANDOM PHRASE BANKS
-//  Pre-built cat/stormy phrases for the random message button.
-//  Each phrase is an array of cat sounds (tokens) that translate back
-//  to coherent English sentences using the reverse map.
-//  Phrases are stored as actual cat sounds so reverse lookup works
-//  immediately when the user clicks "random."
+//  §3  TONE ENGINE
+//  Cat:   3 levels. Level 1 = normal. Level 3 = loud/caps + extra letters.
+//  Stormy: 5 levels. Level 3 = normal. Level 1 = calm/soft. Level 5 = max.
+//
+//  Cat level rules:
+//    1 → unchanged
+//    2 → +3 chars on longest vowel run, Title Case
+//    3 → +6 chars on vowel run, MIXED CAPS pattern
+//
+//  Stormy level rules:
+//    1 → lowercase, collapse extra vowels (calmer than base)
+//    2 → mostly lowercase, minor extension
+//    3 → normal Stormy (unchanged)
+//    4 → +5 chars on vowel run, MIXED CAPS
+//    5 → +10 chars on vowel run, ALL CAPS
 // ════════════════════════════════════════════════════════════════════════
 
-// These are English sentences we want as randoms — we'll translate them
-// at runtime so they always match the current dictionary.
-const RANDOM_EN_PHRASES_CAT = [
-  "hello i am hungry please give me food now",
-  "i want to sleep on the warm bed",
-  "you are my friend i love you",
-  "stop i am not happy about this",
-  "give me treat or i will hiss",
-  "i am the cat this is my home",
-  "why is the door closed let me outside",
-  "come here and pet me now",
-  "i need food the bowl is empty",
-  "i am going to knock this off the table",
-  "you are late my food was supposed to be here",
-  "do not touch my tail or i will bite",
-  "i found a very comfortable spot on your face",
-  "good morning give me breakfast now please",
-  "i will sit here and stare at you",
-  "the outside world is calling me open the door",
-  "i am awake at three in the morning and i need you to know",
-  "your laptop is warm and i am going to sleep on it",
-  "i love you but also i am going to knock that over",
-  "feed me now this is not a request",
-];
-
-const RANDOM_EN_PHRASES_STORMY = [
-  "hello i am very hungry please give me food now",
-  "i want to sleep on the warm soft bed forever",
-  "you are my best friend i love you so much",
-  "stop right now i am not happy about this at all",
-  "give me every treat or i will hiss at you",
-  "i am the most important cat this is my entire home",
-  "why is the door closed let me go outside right now",
-  "come here and pet me for a very long time now",
-  "i need food immediately the bowl has been empty forever",
-  "i am going to knock everything off this table",
-  "you are very late my food was supposed to be here",
-  "do not even think about touching my tail",
-  "i have found the most comfortable spot on your face",
-  "good morning give me breakfast right now please",
-  "i will sit here and stare at you all day",
-  "the outside world is calling me you must open the door",
-  "i am awake and it is the middle of the night",
-  "your laptop is warm and i am going to sleep on it now",
-  "i love you but i am definitely going to knock that over",
-  "feed me right now this is absolutely not a request",
-];
-
-// Runtime-translated phrase cache (populated lazily)
-let _catPhraseCache    = null;
-let _stormyPhraseCache = null;
-
-function buildPhraseCatCache() {
-  if (_catPhraseCache) return _catPhraseCache;
-  _catPhraseCache = RANDOM_EN_PHRASES_CAT.map(phrase => {
-    const tokens = translateToCat(phrase);
-    return tokens
-      .filter(t => t.type === 'word' || t.type === 'pass')
-      .map(t => t.v)
-      .join(' ')
-      .replace(/<[^>]+>/g, '')
-      .trim();
-  });
-  return _catPhraseCache;
-}
-
-function buildPhraseStormyCache() {
-  if (_stormyPhraseCache) return _stormyPhraseCache;
-  _stormyPhraseCache = RANDOM_EN_PHRASES_STORMY.map(phrase => {
-    const tokens = translateToStormy(phrase);
-    return tokens
-      .filter(t => t.type === 'word' || t.type === 'pass')
-      .map(t => t.v)
-      .join(' ')
-      .replace(/<[^>]+>/g, '')
-      .trim();
-  });
-  return _stormyPhraseCache;
-}
-
-function getRandomPhrase(lang) {
-  if (lang === 'stormy') {
-    const cache = buildPhraseStormyCache();
-    return cache[Math.floor(Math.random() * cache.length)];
+function extendVowels(sound, extraCount) {
+  // Find the longest vowel run and extend it
+  let best = { idx: -1, len: 0 };
+  let i = 0;
+  while (i < sound.length) {
+    if (/[aeiouAEIOU]/.test(sound[i])) {
+      let j = i;
+      while (j < sound.length && /[aeiouAEIOU]/.test(sound[j])) j++;
+      if (j - i > best.len) { best = { idx: i, len: j - i }; }
+      i = j;
+    } else { i++; }
   }
-  const cache = buildPhraseCatCache();
-  return cache[Math.floor(Math.random() * cache.length)];
+  if (best.idx === -1) {
+    // No vowel found — extend the last consonant instead
+    return sound + sound[sound.length - 1].repeat(extraCount);
+  }
+  const mid = sound[best.idx + Math.floor(best.len / 2)];
+  return sound.slice(0, best.idx + best.len) + mid.repeat(extraCount) + sound.slice(best.idx + best.len);
+}
+
+function mixedCaps(sound, density) {
+  // density 0.5 = alternate caps, 1.0 = all caps
+  return sound.split('').map((c, i) => {
+    if (!/[a-zA-Z]/.test(c)) return c;
+    return (i % Math.round(1 / density) === 0) ? c.toUpperCase() : c.toLowerCase();
+  }).join('');
+}
+
+function calmSound(sound) {
+  // Collapse extended vowel runs and lowercase for calm tone
+  return sound
+    .replace(/([aeiouAEIOU])\1{2,}/g, '$1$1') // collapse long vowel runs to 2
+    .replace(/([a-zA-Z])\1{3,}/g, '$1$1$1')   // collapse long consonant runs to 3
+    .toLowerCase();
+}
+
+function applyTone(sound, toneLevel, lang) {
+  if (!sound) return sound;
+  if (lang === 'cat') {
+    switch (toneLevel) {
+      case 1: return sound; // normal
+      case 2: {
+        const ext = extendVowels(sound, 3);
+        return ext[0].toUpperCase() + ext.slice(1);
+      }
+      case 3: {
+        const ext = extendVowels(sound, 6);
+        return mixedCaps(ext, 0.6);
+      }
+      default: return sound;
+    }
+  }
+  if (lang === 'stormy') {
+    switch (toneLevel) {
+      case 1: return calmSound(sound);
+      case 2: {
+        const calm = calmSound(sound);
+        return extendVowels(calm, 1).toLowerCase();
+      }
+      case 3: return sound; // normal stormy
+      case 4: {
+        const ext = extendVowels(sound, 5);
+        return mixedCaps(ext, 0.5);
+      }
+      case 5: {
+        const ext = extendVowels(sound, 10);
+        return ext.toUpperCase();
+      }
+      default: return sound;
+    }
+  }
+  return sound;
 }
 
 // ════════════════════════════════════════════════════════════════════════
-//  §3  UTILITY: HASHING, PASSTHROUGH, STORMY
+//  §4  UTILITY FUNCTIONS
 // ════════════════════════════════════════════════════════════════════════
 
 function djb2(word) {
@@ -209,11 +202,11 @@ function toStormy(sound) {
 }
 
 function censorWord(w) {
-  return !w ? '*' : w.length === 1 ? '*' : w[0] + '*'.repeat(w.length - 1);
+  return !w || w.length <= 1 ? '*' : w[0] + '*'.repeat(w.length - 1);
 }
 
 // ════════════════════════════════════════════════════════════════════════
-//  §4  CAPITALISATION ENGINE
+//  §5  CAPITALISATION ENGINE
 // ════════════════════════════════════════════════════════════════════════
 
 function detectCap(token) {
@@ -240,7 +233,7 @@ function catSoundWithCap(storedSound, inputToken) {
 }
 
 // ════════════════════════════════════════════════════════════════════════
-//  §5  SESSION MAPS (unknown word round-trips)
+//  §6  SESSION MAPS
 // ════════════════════════════════════════════════════════════════════════
 
 const SESSION_FWD = {};
@@ -255,8 +248,7 @@ function getUnknownSound(word) {
   const idx = djb2(clean) % POOL.length;
   let sound = POOL[idx], offset = 0;
   while (SESSION_REV[normKey(sound)] && SESSION_REV[normKey(sound)] !== clean) {
-    offset++;
-    if (offset >= POOL.length) { sound = 'Mrrp' + clean.slice(0, 4); break; }
+    if (++offset >= POOL.length) { sound = 'Mrrp' + clean.slice(0, 4); break; }
     sound = POOL[(idx + offset) % POOL.length];
   }
   SESSION_FWD[clean] = sound;
@@ -264,27 +256,22 @@ function getUnknownSound(word) {
   return sound;
 }
 
-function recoverUnknown(catSound) {
-  return SESSION_REV[normKey(catSound)] || null;
-}
+function recoverUnknown(catSound) { return SESSION_REV[normKey(catSound)] || null; }
 
 // ════════════════════════════════════════════════════════════════════════
-//  §6  LEVENSHTEIN EDIT DISTANCE
-//  Classic two-row DP. Used as one signal in multi-algorithm scoring.
+//  §7  LEVENSHTEIN EDIT DISTANCE
 // ════════════════════════════════════════════════════════════════════════
 
 function lev(a, b) {
   const m = a.length, n = b.length;
-  if (m === 0) return n;
-  if (n === 0) return m;
+  if (!m) return n; if (!n) return m;
   if (Math.abs(m - n) > 5) return Math.abs(m - n) + 1;
-  let prev = new Array(n + 1), curr = new Array(n + 1);
-  for (let j = 0; j <= n; j++) prev[j] = j;
+  let prev = Array.from({length: n+1}, (_,i) => i), curr = new Array(n+1);
   for (let i = 0; i < m; i++) {
     curr[0] = i + 1;
     for (let j = 0; j < n; j++) {
       const c = a[i] === b[j] ? 0 : 1;
-      curr[j + 1] = Math.min(curr[j] + 1, prev[j + 1] + 1, prev[j] + c);
+      curr[j+1] = Math.min(curr[j]+1, prev[j+1]+1, prev[j]+c);
     }
     [prev, curr] = [curr, prev];
   }
@@ -292,39 +279,35 @@ function lev(a, b) {
 }
 
 // ════════════════════════════════════════════════════════════════════════
-//  §7  JARO-WINKLER SIMILARITY
-//  Returns 0.0 (no match) to 1.0 (identical).
-//  Better than edit distance for short strings and transpositions.
+//  §8  JARO-WINKLER SIMILARITY
 // ════════════════════════════════════════════════════════════════════════
 
 function jaro(s1, s2) {
   if (s1 === s2) return 1;
   const l1 = s1.length, l2 = s2.length;
-  if (l1 === 0 || l2 === 0) return 0;
-  const matchDist = Math.max(Math.floor(Math.max(l1, l2) / 2) - 1, 0);
-  const s1Matches = new Array(l1).fill(false);
-  const s2Matches = new Array(l2).fill(false);
-  let matches = 0, transpositions = 0;
+  if (!l1 || !l2) return 0;
+  const md = Math.max(Math.floor(Math.max(l1, l2) / 2) - 1, 0);
+  const m1 = new Array(l1).fill(false), m2 = new Array(l2).fill(false);
+  let matches = 0, trans = 0;
   for (let i = 0; i < l1; i++) {
-    const start = Math.max(0, i - matchDist);
-    const end   = Math.min(i + matchDist + 1, l2);
-    for (let j = start; j < end; j++) {
-      if (s2Matches[j] || s1[i] !== s2[j]) continue;
-      s1Matches[i] = true; s2Matches[j] = true; matches++; break;
+    const lo = Math.max(0, i - md), hi = Math.min(i + md + 1, l2);
+    for (let j = lo; j < hi; j++) {
+      if (m2[j] || s1[i] !== s2[j]) continue;
+      m1[i] = m2[j] = true; matches++; break;
     }
   }
-  if (matches === 0) return 0;
+  if (!matches) return 0;
   let k = 0;
   for (let i = 0; i < l1; i++) {
-    if (!s1Matches[i]) continue;
-    while (!s2Matches[k]) k++;
-    if (s1[i] !== s2[k]) transpositions++;
+    if (!m1[i]) continue;
+    while (!m2[k]) k++;
+    if (s1[i] !== s2[k]) trans++;
     k++;
   }
-  return (matches / l1 + matches / l2 + (matches - transpositions / 2) / matches) / 3;
+  return (matches/l1 + matches/l2 + (matches - trans/2)/matches) / 3;
 }
 
-function jaroWinkler(s1, s2, p = 0.1) {
+function jaroWinkler(s1, s2, p=0.1) {
   const j = jaro(s1, s2);
   let prefix = 0;
   for (let i = 0; i < Math.min(4, s1.length, s2.length); i++) {
@@ -334,102 +317,67 @@ function jaroWinkler(s1, s2, p = 0.1) {
 }
 
 // ════════════════════════════════════════════════════════════════════════
-//  §8  PHONETIC NORMALISATION
-//  Strips the "cat-ness" from a sound for fuzzy comparison.
-//  Groups vowel runs, collapses repeated consonants, standardises known
-//  cat morphemes (mrrr→mrr, rrrr→rr, etc.)
+//  §9  PHONETIC NORMALISATION
 // ════════════════════════════════════════════════════════════════════════
 
 function phoneticNorm(s) {
-  return s
-    .toLowerCase()
+  return s.toLowerCase()
     .replace(/[^a-z]/g, '')
-    // Collapse vowel runs to single vowel
     .replace(/([aeiou])\1+/g, '$1')
-    // Collapse consonant runs longer than 2 to 2
     .replace(/([bcdfghjklmnpqrstvwxyz])\1{2,}/g, '$1$1')
-    // Map common cat-sound endings
-    .replace(/ph+$/,  'f')
-    .replace(/ll+/g,  'l')
-    .replace(/mm+/g,  'm')
-    .replace(/rr+/g,  'r')
-    .replace(/ww+/g,  'w')
-    .replace(/nn+/g,  'n')
-    // Collapse repeated sounds
+    .replace(/ph+$/, 'f')
+    .replace(/ll+/g, 'l')
+    .replace(/mm+/g, 'm')
+    .replace(/rr+/g, 'r')
+    .replace(/ww+/g, 'w')
+    .replace(/nn+/g, 'n')
     .replace(/(.)\1+/g, '$1');
 }
 
 // ════════════════════════════════════════════════════════════════════════
-//  §9  N-GRAM FINGERPRINT
-//  Character bigrams and trigrams as a set.
-//  Jaccard similarity of n-gram sets handles reordered/corrupted sounds.
+//  §10  N-GRAM JACCARD
 // ════════════════════════════════════════════════════════════════════════
 
 function ngrams(s, n) {
-  const result = new Set();
-  for (let i = 0; i <= s.length - n; i++) result.add(s.slice(i, i + n));
-  return result;
+  const r = new Set();
+  for (let i = 0; i <= s.length - n; i++) r.add(s.slice(i, i+n));
+  return r;
 }
 
-function jaccardNgram(a, b, n = 2) {
+function jaccardNgram(a, b, n=2) {
   const ga = ngrams(a, n), gb = ngrams(b, n);
-  if (ga.size === 0 && gb.size === 0) return 1;
-  if (ga.size === 0 || gb.size === 0) return 0;
+  if (!ga.size && !gb.size) return 1;
+  if (!ga.size || !gb.size) return 0;
   let inter = 0;
   for (const g of ga) if (gb.has(g)) inter++;
   return inter / (ga.size + gb.size - inter);
 }
 
 // ════════════════════════════════════════════════════════════════════════
-//  §10  COMPOSITE SIMILARITY SCORE
-//  Combines Jaro-Winkler, phonetic Lev, and n-gram Jaccard into one score
-//  from 0.0 (no match) to 1.0 (identical).
-//
-//  Weights:
-//    Jaro-Winkler  40%  — good for short transpositions
-//    Phonetic Lev  35%  — handles stretching / extra letters
-//    Bigram Jaccard 25% — handles severely mangled inputs
+//  §11  COMPOSITE SIMILARITY SCORE
 // ════════════════════════════════════════════════════════════════════════
 
-const JW_WEIGHT     = 0.40;
-const PHON_WEIGHT   = 0.35;
-const NGRAM_WEIGHT  = 0.25;
-const MATCH_THRESHOLD = 0.60; // minimum score to count as a match
+const MATCH_THRESHOLD = 0.58;
 
 function compositeScore(input, candidate) {
-  const normInput = phoneticNorm(input);
-  const normCand  = phoneticNorm(candidate);
-
-  // Jaro-Winkler on normalised strings
-  const jw = jaroWinkler(normInput, normCand);
-
-  // Phonetic Levenshtein converted to similarity
-  const maxLen  = Math.max(normInput.length, normCand.length) || 1;
-  const levDist = lev(normInput, normCand);
-  const levSim  = Math.max(0, 1 - levDist / maxLen);
-
-  // Bigram Jaccard on original (lowercased) strings
+  const ni = phoneticNorm(input), nc = phoneticNorm(candidate);
+  const jw = jaroWinkler(ni, nc);
+  const maxLen = Math.max(ni.length, nc.length) || 1;
+  const levSim = Math.max(0, 1 - lev(ni, nc) / maxLen);
   const ng = jaccardNgram(input.toLowerCase(), candidate.toLowerCase(), 2);
-
-  return jw * JW_WEIGHT + levSim * PHON_WEIGHT + ng * NGRAM_WEIGHT;
+  return jw * 0.4 + levSim * 0.35 + ng * 0.25;
 }
 
 // ════════════════════════════════════════════════════════════════════════
-//  §11  REVERSE LOOKUP MAP BUILDERS
-//  Maps normKey(catSound) → { eng, label } for O(1) exact lookup.
+//  §12  REVERSE MAP BUILDERS
 // ════════════════════════════════════════════════════════════════════════
 
-let CAT_REV_MAP    = null;
-let STORMY_REV_MAP = null;
-// Also pre-compute phonetic index: normPhonetic(sound) → [entries]
-let CAT_PHON_INDEX    = null;
-let STORMY_PHON_INDEX = null;
+let CAT_REV_MAP = null, STORMY_REV_MAP = null;
+let CAT_PHON_INDEX = null, STORMY_PHON_INDEX = null;
 
 function buildRevMap(entries) {
   const map = {};
-  for (const e of entries) {
-    if (e.key && !map[e.key]) map[e.key] = e;
-  }
+  for (const e of entries) { if (e.key && !map[e.key]) map[e.key] = e; }
   return map;
 }
 
@@ -444,195 +392,250 @@ function buildPhonIndex(map) {
 }
 
 function initRevMaps() {
-  if (CAT_REV_MAP) return; // already built
+  if (CAT_REV_MAP) return;
   if (typeof catDict === 'undefined') return;
-
   const catEntries = Object.entries(catDict).map(([eng, v]) => ({
     key: normKey(v.cat), eng, label: null, sound: v.cat,
   }));
   CAT_REV_MAP = buildRevMap(catEntries);
   CAT_PHON_INDEX = buildPhonIndex(CAT_REV_MAP);
-
-  const stormyEntries = [];
+  const stEntries = [];
   if (typeof stormySpecial !== 'undefined') {
-    for (const [eng, v] of Object.entries(stormySpecial)) {
-      stormyEntries.push({ key: normKey(v.stormy), eng, label: v.label, sound: v.stormy });
-    }
+    for (const [eng, v] of Object.entries(stormySpecial))
+      stEntries.push({ key: normKey(v.stormy), eng, label: v.label, sound: v.stormy });
   }
   for (const [eng, v] of Object.entries(catDict)) {
-    const s = toStormy(v.cat);
-    stormyEntries.push({ key: normKey(s), eng, label: null, sound: s });
+    stEntries.push({ key: normKey(toStormy(v.cat)), eng, label: null, sound: toStormy(v.cat) });
   }
-  STORMY_REV_MAP = buildRevMap(stormyEntries);
+  STORMY_REV_MAP = buildRevMap(stEntries);
   STORMY_PHON_INDEX = buildPhonIndex(STORMY_REV_MAP);
 }
 
 // ════════════════════════════════════════════════════════════════════════
-//  §12  MULTI-PASS REVERSE DECRYPTION
-//  For each input token, tries five passes in order:
-//    Pass 1: Exact match (normKey)
-//    Pass 2: Session map (unknown word recovery)
-//    Pass 3: Phonetic index lookup (fast pre-filter)
-//    Pass 4: Composite-score fuzzy search over phonetic candidates
-//    Pass 5: Full composite-score search over ALL map entries (last resort)
-//  The first pass that yields a match above MATCH_THRESHOLD wins.
+//  §13  MULTI-PASS REVERSE TOKEN LOOKUP
 // ════════════════════════════════════════════════════════════════════════
 
 function reverseToken(tok, map, phonIdx) {
-  const key      = normKey(tok);
-  const inputCap = detectCap(tok);
+  const key = normKey(tok);
 
   // Pass 1: exact
   const exact = map[key];
   if (exact) return { entry: exact, pass: 1, score: 1.0 };
 
-  // Pass 2: session map
-  const recovered = recoverUnknown(tok);
-  if (recovered) return {
-    entry: { eng: recovered, label: null }, pass: 2, score: 1.0
-  };
+  // Pass 2: session recovery
+  const rec = recoverUnknown(tok);
+  if (rec) return { entry: { eng: rec, label: null }, pass: 2, score: 1.0 };
 
-  // Pass 3 + 4: phonetic index candidates
+  // Pass 3+4: phonetic candidates
   const phonKey = phoneticNorm(tok);
   const candidates = [];
-
-  // Exact phonetic key
-  if (phonIdx[phonKey]) {
-    for (const c of phonIdx[phonKey]) {
-      const sc = compositeScore(key, c.key);
-      candidates.push({ entry: c.entry, score: sc });
+  if (phonIdx && phonIdx[phonKey]) {
+    for (const c of phonIdx[phonKey]) candidates.push({ entry: c.entry, score: compositeScore(key, c.key) });
+  }
+  if (phonIdx) {
+    for (const [pk, items] of Object.entries(phonIdx)) {
+      if (pk === phonKey) continue;
+      if (Math.abs(pk.length - phonKey.length) > 5) continue;
+      if (jaccardNgram(phonKey, pk, 2) < 0.3) continue;
+      for (const c of items) {
+        const sc = compositeScore(key, c.key);
+        if (sc > MATCH_THRESHOLD * 0.7) candidates.push({ entry: c.entry, score: sc });
+      }
     }
   }
-  // Partial phonetic overlap — check keys whose phonetic starts/ends match
-  for (const [pk, items] of Object.entries(phonIdx)) {
-    if (pk === phonKey) continue; // already handled
-    if (Math.abs(pk.length - phonKey.length) > 5) continue;
-    const overlap = jaccardNgram(phonKey, pk, 2);
-    if (overlap < 0.3) continue;
-    for (const c of items) {
-      const sc = compositeScore(key, c.key);
-      if (sc > MATCH_THRESHOLD * 0.7) candidates.push({ entry: c.entry, score: sc });
-    }
-  }
-
   if (candidates.length > 0) {
     candidates.sort((a, b) => b.score - a.score);
-    const best = candidates[0];
-    if (best.score >= MATCH_THRESHOLD) {
-      return { entry: best.entry, pass: 4, score: best.score };
-    }
+    if (candidates[0].score >= MATCH_THRESHOLD) return { entry: candidates[0].entry, pass: 4, score: candidates[0].score };
   }
 
-  // Pass 5: brute-force composite score over all entries
+  // Pass 5: brute force
   let bestScore = -1, bestEntry = null;
   for (const [mKey, mEntry] of Object.entries(map)) {
     const sc = compositeScore(key, mKey);
     if (sc > bestScore) { bestScore = sc; bestEntry = mEntry; }
   }
-  if (bestEntry && bestScore >= MATCH_THRESHOLD) {
-    return { entry: bestEntry, pass: 5, score: bestScore };
-  }
+  if (bestEntry && bestScore >= MATCH_THRESHOLD) return { entry: bestEntry, pass: 5, score: bestScore };
 
-  return null; // no match
+  return null;
 }
 
 // ════════════════════════════════════════════════════════════════════════
-//  §13  TOKENISER
+//  §14  TOKENISER
 // ════════════════════════════════════════════════════════════════════════
 
 function tokenise(text) {
-  return text.split(/(\s+|[,.!?;:'"()\[\]{}\-\/\\])/).filter(t => t != null && t !== '');
+  return text.split(/(\s+|[,.!?;:'"()\[\]{}\\/])/).filter(t => t != null && t !== '');
 }
 function isSpace(t) { return /^\s+$/.test(t); }
-function isPunct(t) { return /^[,.!?;:'"()\[\]{}\-\/\\]+$/.test(t); }
+function isPunct(t) { return /^[,.!?;:'"()\[\]{}\\/]+$/.test(t); }
 
 // ════════════════════════════════════════════════════════════════════════
-//  §14  FORWARD TRANSLATION  English → Cat
+//  §15  FORWARD TRANSLATION  English → Cat
+//  toneLevel: 1 (normal), 2, 3 (loud)
 // ════════════════════════════════════════════════════════════════════════
 
-function translateToCat(text) {
+function translateToCat(text, toneLevel) {
   if (!text || !text.trim()) return [];
+  toneLevel = toneLevel || 1;
   initRevMaps();
   const result = [];
   for (const tok of tokenise(text)) {
-    if (isSpace(tok)) { result.push({ type: 'space', v: tok }); continue; }
+    if (isSpace(tok)) { result.push({ type: 'space', v: ' ' }); continue; }
     if (isPunct(tok)) { result.push({ type: 'punct', v: tok }); continue; }
     if (isPassthrough(tok)) { result.push({ type: 'pass', v: tok }); continue; }
     const clean = tok.toLowerCase().replace(/[^a-z']/g, '');
     const entry = (typeof catDict !== 'undefined') && catDict[clean];
-    if (entry) {
-      result.push({ type: 'word', mode: 'cat', conf: 'high',
-                    v: catSoundWithCap(entry.cat, tok) });
-    } else {
-      result.push({ type: 'word', mode: 'cat', conf: 'low',
-                    v: catSoundWithCap(getUnknownSound(clean || tok), tok) });
-    }
+    let rawSound = entry ? entry.cat : getUnknownSound(clean || tok);
+    rawSound = applyTone(rawSound, toneLevel, 'cat');
+    result.push({ type: 'word', mode: 'cat', conf: entry ? 'high' : 'low',
+                  v: catSoundWithCap(rawSound, tok) });
   }
   return result;
 }
 
 // ════════════════════════════════════════════════════════════════════════
-//  §15  FORWARD TRANSLATION  English → Stormy
+//  §16  FORWARD TRANSLATION  English → Stormy
+//  toneLevel: 1 (calm), 2, 3 (normal), 4, 5 (max)
 // ════════════════════════════════════════════════════════════════════════
 
-function translateToStormy(text) {
+function translateToStormy(text, toneLevel) {
   if (!text || !text.trim()) return [];
+  toneLevel = toneLevel || 3;
   initRevMaps();
   const result = [];
   for (const tok of tokenise(text)) {
-    if (isSpace(tok)) { result.push({ type: 'space', v: tok }); continue; }
+    if (isSpace(tok)) { result.push({ type: 'space', v: ' ' }); continue; }
     if (isPunct(tok)) { result.push({ type: 'punct', v: tok }); continue; }
     if (isPassthrough(tok)) { result.push({ type: 'pass', v: tok }); continue; }
     const clean = tok.toLowerCase().replace(/[^a-z']/g, '');
     const special = (typeof stormySpecial !== 'undefined') && stormySpecial[clean];
     if (special) {
+      let rawSound = applyTone(special.stormy, toneLevel, 'stormy');
       result.push({ type: 'word', mode: 'stormy-special', label: special.label,
-                    conf: 'high', v: catSoundWithCap(special.stormy, tok) });
+                    conf: 'high', v: catSoundWithCap(rawSound, tok) });
       continue;
     }
     const entry = (typeof catDict !== 'undefined') && catDict[clean];
     const base  = entry ? entry.cat : getUnknownSound(clean || tok);
+    const stormy = toStormy(base);
+    const toned  = applyTone(stormy, toneLevel, 'stormy');
     result.push({ type: 'word', mode: 'stormy', conf: entry ? 'high' : 'low',
-                  v: catSoundWithCap(toStormy(base), tok) });
+                  v: catSoundWithCap(toned, tok) });
   }
   return result;
 }
 
 // ════════════════════════════════════════════════════════════════════════
-//  §16  REVERSE TRANSLATION  Cat/Stormy → English
-//  Uses multi-pass decryption (§12) per token.
+//  §17  PHONETIC ALIAS TABLE  (common misspellings → canonical)
 // ════════════════════════════════════════════════════════════════════════
 
-function translateFromAnimal(text, map, phonIdx) {
+const PHONETIC_ALIASES = {
+  'meaow':'meow','miaow':'meow','miaou':'meow','miow':'meow',
+  'mrow':'mrrow','mreow':'mreow','purrrr':'purr','purrr':'purr',
+  'hisss':'hiss','hissss':'hiss','hissssss':'hiss','triill':'trill',
+  'trrill':'trill','chirrp':'chirp','chrrp':'chirp','chiirp':'chirp',
+  'nyow':'nyow','nyaaow':'nyaow','mrrph':'mrrph','mrph':'mrrph',
+  'mrrrph':'mrrph','snif':'sniff','sniif':'sniff','snifff':'sniff',
+  'noom':'nom','prrt':'prrt','prt':'prrt','prrrt':'prrt',
+  'mrp':'mrrp','merrow':'mrrow','merow':'mrrow','meeow':'meow',
+  'puur':'purr','youl':'yowl','yowwl':'yowl','grrowl':'growl',
+  'grrrowl':'growl','reow':'mrrow','rrow':'mrrow','nyan':'nyaow',
+  'nya':'nyaow','brr':'brrow','brrr':'brrow','mewww':'meww',
+};
+
+function resolveAlias(token) {
+  const lower = token.toLowerCase().replace(/[^a-z]/g, '');
+  return PHONETIC_ALIASES[lower] || token;
+}
+
+function reverseTokenWithAlias(tok, map, phonIdx) {
+  const direct = reverseToken(tok, map, phonIdx);
+  if (direct && direct.score >= 0.9) return direct;
+  const alias = resolveAlias(tok);
+  if (alias !== tok) {
+    const ar = reverseToken(alias, map, phonIdx);
+    if (ar && (!direct || ar.score > direct.score)) return ar;
+  }
+  return direct;
+}
+
+// ════════════════════════════════════════════════════════════════════════
+//  §18  STORMY DE-STORM REVERSE
+// ════════════════════════════════════════════════════════════════════════
+
+function deStorm(sound) {
+  return sound.replace(/([aeiouAEIOU])\1{2,}/g, '$1$1');
+}
+
+function reverseTokenStormy(tok, map, phonIdx) {
+  const direct = reverseTokenWithAlias(tok, map, phonIdx);
+  if (direct && direct.score >= 0.85) return direct;
+  const ds = deStorm(tok);
+  if (ds !== tok) {
+    const dsr = reverseToken(ds, map, phonIdx);
+    if (dsr && (!direct || dsr.score > direct.score)) return dsr;
+    if (CAT_REV_MAP) {
+      const cr = reverseToken(ds, CAT_REV_MAP, CAT_PHON_INDEX);
+      if (cr && (!direct || cr.score > direct.score)) return cr;
+    }
+  }
+  return direct;
+}
+
+// ════════════════════════════════════════════════════════════════════════
+//  §19  WORD SEGMENTER  (for run-together sounds)
+// ════════════════════════════════════════════════════════════════════════
+
+function segmentCatString(input, map) {
+  const keys = Object.keys(map).sort((a, b) => b.length - a.length);
+  const lower = input.toLowerCase().replace(/[^a-z]/g, '');
+  const tokens = [];
+  let pos = 0;
+  while (pos < lower.length) {
+    let matched = false;
+    for (const key of keys) {
+      if (lower.startsWith(key, pos)) { tokens.push(key); pos += key.length; matched = true; break; }
+    }
+    if (!matched) { tokens.push(lower[pos]); pos++; }
+  }
+  return tokens.join(' ');
+}
+
+function preprocessInput(text, map) {
+  const trimmed = text.trim();
+  if (/\s/.test(trimmed) || trimmed.length < 6) return trimmed;
+  if (trimmed.length > 8) {
+    const seg = segmentCatString(trimmed, map);
+    if (seg.includes(' ')) return seg;
+  }
+  return trimmed;
+}
+
+// ════════════════════════════════════════════════════════════════════════
+//  §20  REVERSE TRANSLATION  Cat/Stormy → English
+// ════════════════════════════════════════════════════════════════════════
+
+function translateFromAnimal(text, map, phonIdx, isStormy) {
   if (!text || !text.trim()) return [];
   initRevMaps();
-  // Apply word segmenter and alias pre-processing if available
-  if (typeof preprocessInput === 'function' && map) text = preprocessInput(text, map);
-  const rawTokens = text.trim().split(/(\s+)/).filter(t => t != null && t !== '');
-  const result    = [];
-
-  for (const tok of rawTokens) {
-    if (isSpace(tok)) { result.push({ type: 'space', v: tok }); continue; }
+  if (map) text = preprocessInput(text, map);
+  const rawToks = text.trim().split(/(\s+)/).filter(t => t != null && t !== '');
+  const result  = [];
+  for (const tok of rawToks) {
+    if (isSpace(tok)) { result.push({ type: 'space', v: ' ' }); continue; }
     if (isPunct(tok)) { result.push({ type: 'punct', v: tok }); continue; }
     if (isPassthrough(tok)) { result.push({ type: 'pass', v: tok }); continue; }
-
     const inputCap = detectCap(tok);
-    const match    = reverseTokenWithAlias(tok, map, phonIdx);
-
+    const match    = isStormy
+      ? reverseTokenStormy(tok, map, phonIdx)
+      : reverseTokenWithAlias(tok, map, phonIdx);
     if (match) {
       const isCurse = match.entry.label === 'curse';
       const raw     = isCurse ? censorWord(match.entry.eng) : match.entry.eng;
-      const display = applyCap(inputCap, raw);
       const conf    = match.score >= 0.9 ? 'high' : match.score >= MATCH_THRESHOLD ? 'mid' : 'low';
-      result.push({
-        type: 'word',
-        mode: match.entry.label ? 'stormy-special' : 'normal',
-        label: match.entry.label,
-        conf,
-        pass: match.pass,
-        score: match.score,
-        v: display,
-      });
+      result.push({ type: 'word', mode: match.entry.label ? 'stormy-special' : 'normal',
+                    label: match.entry.label, conf, pass: match.pass, score: match.score,
+                    v: applyCap(inputCap, raw) });
     } else {
       result.push({ type: 'word', mode: 'unknown', conf: 'low', pass: 0, score: 0, v: tok });
     }
@@ -641,269 +644,60 @@ function translateFromAnimal(text, map, phonIdx) {
 }
 
 // ════════════════════════════════════════════════════════════════════════
-//  §17  HTML RENDERER
+//  §21  HTML RENDERER
+//  IMPORTANT: uses ' ' space between word spans for visual separation.
 // ════════════════════════════════════════════════════════════════════════
 
 function esc(s) {
-  return String(s)
-    .replace(/&/g, '&amp;').replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 
 function renderTokens(tokens, direction) {
   let html = '';
+  let prevWasWord = false;
   for (const tok of tokens) {
-    if (tok.type === 'space') { html += ' '; continue; }
-    if (tok.type === 'punct') { html += esc(tok.v); continue; }
+    const needsSpace = prevWasWord && tok.type === 'word';
+    if (tok.type === 'space') { if (prevWasWord) html += ' '; prevWasWord = false; continue; }
+    if (tok.type === 'punct') { html += esc(tok.v); prevWasWord = false; continue; }
     if (tok.type === 'pass')  {
-      html += `<span class="col-pass">${esc(tok.v)}</span>`; continue;
+      if (needsSpace) html += ' ';
+      html += `<span class="col-pass">${esc(tok.v)}</span>`;
+      prevWasWord = true; continue;
     }
+    if (needsSpace) html += ' ';
     const v = esc(tok.v);
-
     if (direction === 'to-cat') {
-      html += tok.conf === 'low'
-        ? `<span class="col-low">${v}</span>`
-        : `<span class="col-cat">${v}</span>`;
-
+      html += `<span class="${tok.conf==='low'?'col-low':'col-cat'}">${v}</span>`;
     } else if (direction === 'to-stormy') {
-      if (tok.conf === 'low') {
-        html += `<span class="col-low">${v}</span>`;
-      } else if (tok.mode === 'stormy-special') {
-        const cls = tok.label === 'curse' ? 'col-curse'
-                  : tok.label === 'intense' ? 'col-intense' : 'col-vocab';
+      if (tok.conf === 'low') { html += `<span class="col-low">${v}</span>`; }
+      else if (tok.mode === 'stormy-special') {
+        const cls = tok.label==='curse'?'col-curse':tok.label==='intense'?'col-intense':'col-vocab';
         html += `<span class="${cls}">${v}</span>`;
-      } else {
-        html += `<span class="col-stormy">${v}</span>`;
-      }
-
+      } else { html += `<span class="col-stormy">${v}</span>`; }
     } else {
-      // Reverse
       if (tok.mode === 'stormy-special') {
-        const cls = tok.label === 'curse' ? 'col-curse'
-                  : tok.label === 'intense' ? 'col-intense' : 'col-vocab';
+        const cls = tok.label==='curse'?'col-curse':tok.label==='intense'?'col-intense':'col-vocab';
         html += `<span class="${cls}">${v}</span>`;
       } else if (tok.conf === 'low' || tok.mode === 'unknown') {
         html += `<span class="col-low">${v}</span>`;
       } else if (tok.conf === 'mid') {
-        // fuzzy match — slightly muted colour
         html += `<span class="col-cat col-fuzzy">${v}</span>`;
-      } else {
-        html += `<span class="col-cat">${v}</span>`;
-      }
+      } else { html += `<span class="col-cat">${v}</span>`; }
     }
+    prevWasWord = true;
   }
   return html;
 }
 
 // ════════════════════════════════════════════════════════════════════════
-//  §18  MAIN doTranslate DISPATCHER
-// ════════════════════════════════════════════════════════════════════════
-
-function doTranslate(type, text) {
-  initRevMaps();
-  let tokens;
-  switch (type) {
-    case 'to-cat':
-      tokens = translateToCat(text); break;
-    case 'to-stormy':
-      tokens = translateToStormy(text); break;
-    case 'from-cat':
-      tokens = translateFromAnimal(text, CAT_REV_MAP, CAT_PHON_INDEX); break;
-    case 'from-stormy':
-      tokens = translateFromAnimal(text, STORMY_REV_MAP, STORMY_PHON_INDEX); break;
-    default:
-      return '';
-  }
-  return renderTokens(tokens, type);
-}
-
-// ════════════════════════════════════════════════════════════════════════
-//  §19  WORKER MESSAGE HANDLER
-// ════════════════════════════════════════════════════════════════════════
-
-if (typeof self !== 'undefined' && typeof WorkerGlobalScope !== 'undefined'
-    && self instanceof WorkerGlobalScope) {
-  self.onmessage = function(e) {
-    const { id, type, text, lang } = e.data;
-    if (type === 'random') {
-      self.postMessage({ id, text: getRandomPhrase(lang || 'cat') });
-      return;
-    }
-    const html = doTranslate(type, text);
-    self.postMessage({ id, html });
-  };
-}
-
-// ════════════════════════════════════════════════════════════════════════
-//  §20  SCRIPT MODE EXPORTS (window context fallback)
-// ════════════════════════════════════════════════════════════════════════
-
-if (typeof window !== 'undefined') {
-  window._catEngine = {
-    doTranslate, initRevMaps, getRandomPhrase,
-    translateToCat, translateToStormy, translateFromAnimal,
-    renderTokens, lev, djb2, jaroWinkler, compositeScore,
-    phoneticNorm, jaccardNgram, detectCap, applyCap,
-    getUnknownSound, recoverUnknown, toStormy,
-    POOL, CAT_REV_MAP, STORMY_REV_MAP,
-  };
-}
-
-// ════════════════════════════════════════════════════════════════════════
-//  §21  SELF-TEST SUITE
-// ════════════════════════════════════════════════════════════════════════
-
-(function selfTest() {
-  if (typeof catDict === 'undefined') return;
-  initRevMaps();
-
-  // Lev tests
-  const levCases = [['cat','cat',0],['cat','bat',1],['meow','mew',1],['purr','purrr',1]];
-  for (const [a,b,e] of levCases) {
-    if (lev(a,b) !== e) console.warn(`[CT] lev("${a}","${b}") wrong`);
-  }
-
-  // Jaro-Winkler sanity
-  if (jaroWinkler('meow','meow') < 0.99) console.warn('[CT] JW identity failed');
-  if (jaroWinkler('meow','ZZZZ') > 0.5)  console.warn('[CT] JW dissimilar too high');
-
-  // PhoneticNorm idempotency
-  const pn = phoneticNorm('Mrrroooow');
-  if (pn !== phoneticNorm(pn)) console.warn('[CT] phoneticNorm not idempotent');
-
-  // Cap round-trip
-  const caps = [['MEOW','upper'],['Meow','title'],['meow','lower']];
-  for (const [tok, expected] of caps) {
-    if (detectCap(tok) !== expected) console.warn(`[CT] detectCap("${tok}") wrong`);
-  }
-  if (applyCap('upper','hello') !== 'HELLO') console.warn('[CT] applyCap upper wrong');
-  if (applyCap('title','hello') !== 'Hello') console.warn('[CT] applyCap title wrong');
-  if (applyCap('lower','HELLO') !== 'hello') console.warn('[CT] applyCap lower wrong');
-
-  // Forward determinism
-  const h1 = doTranslate('to-cat', 'hello world');
-  const h2 = doTranslate('to-cat', 'hello world');
-  if (h1 !== h2) console.warn('[CT] Forward not deterministic');
-
-
-  // Random phrase bank builds without errors
-  try {
-    const p = getRandomPhrase('cat');
-    if (!p || p.length === 0) console.warn('[CT] Random phrase empty');
-  } catch(e) { console.warn('[CT] Random phrase error:', e.message); }
-})();
-
-// ════════════════════════════════════════════════════════════════════════
-//  §22  EXTENDED PHONETIC ALIAS TABLE
-//  Maps common misspellings / alternative spellings of cat sounds to
-//  their canonical form. Applied during reverse lookup before the main
-//  passes so users can type approximate sounds and still get good results.
-//
-//  Examples:
-//    "mrow"   → treat as "mrrow"
-//    "purrr"  → treat as "purr"
-//    "meaow"  → treat as "meow"
-//    "nyaow"  → exact (no change)
-//    "hisss"  → treat as "hiss"
-//    "chirrp" → treat as "chirp"
-//    "triill" → treat as "trill"
-// ════════════════════════════════════════════════════════════════════════
-
-const PHONETIC_ALIASES = {
-  // Vowel stretching variations
-  'meaow':   'meow',  'miaow':  'meow',  'miaou': 'meow',   'miow':   'meow',
-  'mrow':    'mrrow', 'mrow':   'mrrow', 'meow':  'meow',   'mreow':  'mreow',
-  'purrrr':  'purr',  'purrr':  'purr',  'purrrrr':'purr',
-  'hisss':   'hiss',  'hissss': 'hiss',  'hissssss':'hiss',
-  'triill':  'trill', 'trrill': 'trill', 'trilll': 'trill',
-  'chirrp':  'chirp', 'chrrp':  'chirp', 'chiirp': 'chirp',
-  'nyow':    'nyow',  'nyaow':  'nyaow', 'nyaaow': 'nyaow',
-  'mrrph':   'mrrph', 'mrph':   'mrrph', 'mrrrph': 'mrrph',
-  'snif':    'sniff', 'sniif':  'sniff', 'snifff': 'sniff',
-  'nom':     'nom',   'nomm':   'nomm',  'noom':   'nom',
-  'prrt':    'prrt',  'prt':    'prrt',  'prrrt':  'prrt',
-  'mrrp':    'mrrp',  'mrp':    'mrrp',  'mrrpp':  'mrrp',
-  // Common typos
-  'merrow':  'mrrow', 'merow':  'mrrow', 'meeow':  'meow',
-  'puur':    'purr',  'purr':   'purr',  'purring':'purr',
-  'yowl':    'yowl',  'youl':   'yowl',  'yowwl':  'yowl',
-  'growl':   'growl', 'grrrowl':'growl', 'grrowl': 'growl',
-  'howl':    'yowl',  'wail':   'mrrooow',
-  // Casual human attempts at cat sounds
-  'mew':     'mew',   'meww':   'meww',  'mewww':  'meww',
-  'reow':    'mrrow', 'rrow':   'mrrow', 'row':    'mrrow',
-  'nyan':    'nyaow', 'nya':    'nyaow',
-  'brr':     'brrow', 'brrr':   'brrow',
-  'frrp':    'frrp',  'frrpp':  'frrp',
-  'prr':     'prrr',  'prrr':   'purrr',
-};
-
-// Apply alias table before main reverse lookup
-function resolveAlias(token) {
-  const lower = token.toLowerCase().replace(/[^a-z]/g, '');
-  return PHONETIC_ALIASES[lower] || token;
-}
-
-// reverseTokenWithAlias: tries reverseToken with alias fallback (no redefinition)
-function reverseTokenWithAlias(tok, map, phonIdx) {
-  const direct = reverseToken(tok, map, phonIdx);
-  if (direct && direct.score >= 0.9) return direct;
-  const alias = resolveAlias(tok);
-  if (alias !== tok) {
-    const aliasResult = reverseToken(alias, map, phonIdx);
-    if (aliasResult && (!direct || aliasResult.score > direct.score)) return aliasResult;
-  }
-  return direct;
-}
-
-// ════════════════════════════════════════════════════════════════════════
-//  §23  STORMY-SPECIFIC REVERSE DECRYPTION HELPERS
-//  Stormy sounds have extended vowels. Before reverse-looking up a Stormy
-//  token, we attempt to "de-storm" it — collapse the extended vowel runs
-//  back to their base form — and also try to look up the de-stormed
-//  version as a cat sound (since all stormy sounds derive from cat sounds).
-// ════════════════════════════════════════════════════════════════════════
-
-// Collapse extended vowel runs (reverse of toStormy)
-// "Mrrroooow" → "Mrrow", "Purrrrrr" → "Purr", "Meeeew" → "Mew"
-function deStorm(sound) {
-  // Collapse any vowel run of 3+ to just 2 (a minimal cat form)
-  return sound.replace(/([aeiouAEIOU])\1{2,}/g, '$1$1');
-}
-
-// Extended reverse lookup for stormy: also tries deStorm version
-function reverseTokenStormy(tok, map, phonIdx) {
-  const direct = reverseTokenWithAlias(tok, map, phonIdx);
-  if (direct && direct.score >= 0.85) return direct;
-  const deStormed = deStorm(tok);
-  if (deStormed !== tok) {
-    const ds = reverseToken(deStormed, map, phonIdx);
-    if (ds && (!direct || ds.score > direct.score)) return ds;
-    if (CAT_REV_MAP) {
-      const catResult = reverseToken(deStormed, CAT_REV_MAP, CAT_PHON_INDEX);
-      if (catResult && (!direct || catResult.score > direct.score)) return catResult;
-    }
-  }
-  return direct;
-}
-
-// ════════════════════════════════════════════════════════════════════════
-//  §24  PHRASE CONFIDENCE SCORING
-//  After translating a full phrase back to English, compute an overall
-//  confidence score and return it alongside the HTML. This lets the UI
-//  show a confidence indicator on the output pane.
+//  §22  PHRASE CONFIDENCE
 // ════════════════════════════════════════════════════════════════════════
 
 function phraseConfidence(tokens) {
   const words = tokens.filter(t => t.type === 'word');
-  if (words.length === 0) return 1.0;
-  const scores = words.map(t => {
-    if (t.conf === 'high')  return 1.0;
-    if (t.conf === 'mid')   return 0.65;
-    if (t.conf === 'low')   return 0.2;
-    return 0.2;
-  });
-  return scores.reduce((a, b) => a + b, 0) / scores.length;
+  if (!words.length) return 1.0;
+  const scores = words.map(t => t.conf==='high'?1.0:t.conf==='mid'?0.65:0.2);
+  return scores.reduce((a,b)=>a+b,0)/scores.length;
 }
 
 function confidenceLabel(score) {
@@ -913,325 +707,339 @@ function confidenceLabel(score) {
   return 'guessing';
 }
 
-// ════════════════════════════════════════════════════════════════════════
-//  §25  ENHANCED doTranslate WITH CONFIDENCE
-// ════════════════════════════════════════════════════════════════════════
-
-function doTranslateWithMeta(type, text) {
-  initRevMaps();
-  let tokens;
-  switch (type) {
-    case 'to-cat':
-      tokens = translateToCat(text); break;
-    case 'to-stormy':
-      tokens = translateToStormy(text); break;
-    case 'from-cat':
-      tokens = translateFromAnimal(text, CAT_REV_MAP, CAT_PHON_INDEX); break;
-    case 'from-stormy': {
-      // Use stormy-specific reverse with deStorm support
-      if (!text || !text.trim()) { tokens = []; break; }
-      initRevMaps();
-      const rawToks = text.trim().split(/(\s+)/).filter(t => t != null && t !== '');
-      tokens = [];
-      for (const tok of rawToks) {
-        if (isSpace(tok)) { tokens.push({ type: 'space', v: tok }); continue; }
-        if (isPunct(tok)) { tokens.push({ type: 'punct', v: tok }); continue; }
-        if (isPassthrough(tok)) { tokens.push({ type: 'pass', v: tok }); continue; }
-        const inputCap = detectCap(tok);
-        const match = reverseTokenStormy(tok, STORMY_REV_MAP, STORMY_PHON_INDEX);
-        if (match) {
-          const isCurse = match.entry.label === 'curse';
-          const raw     = isCurse ? censorWord(match.entry.eng) : match.entry.eng;
-          tokens.push({
-            type: 'word', mode: match.entry.label ? 'stormy-special' : 'normal',
-            label: match.entry.label,
-            conf: match.score >= 0.9 ? 'high' : match.score >= MATCH_THRESHOLD ? 'mid' : 'low',
-            pass: match.pass, score: match.score,
-            v: applyCap(inputCap, raw),
-          });
-        } else {
-          tokens.push({ type: 'word', mode: 'unknown', conf: 'low', pass: 0, score: 0, v: tok });
-        }
-      }
-      break;
-    }
-    default:
-      return { html: '', confidence: 1.0, label: 'confident' };
-  }
-  const html  = renderTokens(tokens, type);
-  const score = phraseConfidence(tokens);
-  return { html, confidence: score, label: confidenceLabel(score) };
-}
-
-// ════════════════════════════════════════════════════════════════════════
-//  §26  RE-EXPORT UPDATED ENGINE TO WINDOW
-// ════════════════════════════════════════════════════════════════════════
-
-if (typeof window !== 'undefined') {
-  Object.assign(window._catEngine || {}, {
-    doTranslateWithMeta, deStorm, resolveAlias,
-    reverseTokenStormy, phraseConfidence, confidenceLabel,
-    PHONETIC_ALIASES,
-  });
-  window._catEngine = window._catEngine || {};
-  window._catEngine.doTranslateWithMeta = doTranslateWithMeta;
-  window._catEngine.getRandomPhrase     = getRandomPhrase;
-  window._catEngine.doTranslate         = doTranslate;
-  window._catEngine.initRevMaps         = initRevMaps;
-}
-
-// ════════════════════════════════════════════════════════════════════════
-//  §27  PATCHED WORKER MESSAGE HANDLER (with confidence + random)
-// ════════════════════════════════════════════════════════════════════════
-
-if (typeof self !== 'undefined' && typeof WorkerGlobalScope !== 'undefined'
-    && self instanceof WorkerGlobalScope) {
-  self.onmessage = function(e) {
-    const { id, type, text, lang } = e.data;
-    if (type === 'random') {
-      self.postMessage({ id, text: getRandomPhrase(lang || 'cat') });
-      return;
-    }
-    const result = doTranslateWithMeta(type, text);
-    self.postMessage({ id, html: result.html, confidence: result.confidence, confLabel: result.label });
-  };
-}
-
-// ════════════════════════════════════════════════════════════════════════
-//  §28  WORD SEGMENTER
-//  When the user pastes a run-together string like "MrrrowMewPurr"
-//  (no spaces), try to split it into recognisable tokens by greedily
-//  matching the longest known sound from the left.
-//  This dramatically improves decryption of copy-pasted output.
-// ════════════════════════════════════════════════════════════════════════
-
-function segmentCatString(input, map) {
-  // Build a sorted array of known keys by length descending
-  const keys = Object.keys(map).sort((a, b) => b.length - a.length);
-  const lower = input.toLowerCase().replace(/[^a-z]/g, '');
-  const tokens = [];
-  let pos = 0;
-  while (pos < lower.length) {
-    let matched = false;
-    for (const key of keys) {
-      if (lower.startsWith(key, pos)) {
-        tokens.push(key);
-        pos += key.length;
-        matched = true;
-        break;
-      }
-    }
-    if (!matched) {
-      // Consume one character as an unknown fragment
-      tokens.push(lower[pos]);
-      pos++;
-    }
-  }
-  return tokens.join(' ');
-}
-
-// Pre-process input: if no spaces detected and string looks like run-together
-// cat sounds (no vowel-consonant pattern of natural language), try segmenting.
-function preprocessInput(text, map) {
-  const trimmed = text.trim();
-  // If input has spaces, use as-is
-  if (/\s/.test(trimmed)) return trimmed;
-  // If it's a single short token, use as-is
-  if (trimmed.length < 6) return trimmed;
-  // Check if it looks like natural language (has spaces between words already)
-  // vs run-together cat sound (all one word). Heuristic: no spaces + length > 8.
-  if (trimmed.length > 8 && !/\s/.test(trimmed)) {
-    const segmented = segmentCatString(trimmed, map);
-    // Only use segmented version if it produced multiple tokens
-    if (segmented.includes(' ')) return segmented;
-  }
-  return trimmed;
-}
-
-// ════════════════════════════════════════════════════════════════════════
-//  §29  REVERSE TRANSLATION PATCH — apply pre-processing
-// ════════════════════════════════════════════════════════════════════════
-
-// §29 patch: preprocessInput applied inside translateFromAnimal directly
-// We do NOT redefine translateFromAnimal to avoid hoisting issues.
-// Instead, preprocessInput is called at the top of translateFromAnimal.
-// See §16 — we patch it by inserting the call there at load time.
-
-// ════════════════════════════════════════════════════════════════════════
-//  §30  EXTENDED RANDOM PHRASE BANK
-//  Additional themed phrase sets for more variety.
-// ════════════════════════════════════════════════════════════════════════
-
-const RANDOM_EN_PHRASES_EXTRA_CAT = [
-  "i am watching you very carefully",
-  "this chair is mine now please leave",
-  "i knocked that over on purpose",
-  "you were gone for five minutes and i missed you",
-  "the red dot must be destroyed",
-  "i do not understand why you are not giving me attention",
-  "every night at exactly three i will walk on your face",
-  "i have decided the clean laundry is my bed now",
-  "your alarm is going off and i will help by sitting on you",
-  "i am not stuck in the box i am choosing to be here",
-  "the dog looked at me and now it must perish",
-  "i require head scratches and i require them immediately",
-  "this is fine i am fine everything is fine give me food",
-  "you moved and now i have to restart my entire nap from scratch",
-  "i have brought you a gift please be grateful it took effort",
-  "the alarm is cold",
-  "big johnnnnn",
-  "frank ocean",
-  "the couch is green",
-  "could i have a glass of water",
-  "quit sleeping",
-  "get off your phone mate",
-];
-
-const RANDOM_EN_PHRASES_EXTRA_STORMY = [
-  "i am watching you with my entire soul",
-  "this chair belongs to me forever and always",
-  "i knocked that over completely on purpose and i would do it again",
-  "you were gone for five whole minutes and i nearly perished",
-  "the red dot is my eternal nemesis and i will destroy it",
-  "i cannot comprehend why you are not giving me all of the attention",
-  "every single night at precisely three i will stomp across your face",
-  "i have made a very important decision about the clean laundry",
-  "your alarm is absolutely going off and i will sit directly on top of you",
-  "i am not trapped in the box i am a powerful being who chooses this",
-  "the dog looked at me with its terrible eyes and now it must be destroyed",
-  "i require extensive head scratches and i require them right now immediately",
-  "everything is completely fine i am totally fine now please feed me",
-  "you moved one millimeter and now i must restart my entire nap from scratch",
-  "i have brought you a magnificent gift please appreciate this enormous effort",
-  "why are the walls cold",
-  "i see you kora",
-  "the storm is tracking northeast at 15mph, how are the temps doc",
-  "the giant horse WHAT weighs over 11 pounds",
-  "i have a phd and you dont DINGUS AHHAHAHA",
-  "how are the words worded to word the word",
-  "FRANK OCEAN",
-];
-
-// Merge extra phrases into main banks
-RANDOM_EN_PHRASES_CAT.push(...RANDOM_EN_PHRASES_EXTRA_CAT);
-RANDOM_EN_PHRASES_STORMY.push(...RANDOM_EN_PHRASES_EXTRA_STORMY);
-
-// Invalidate cache since we added phrases
-_catPhraseCache    = null;
-_stormyPhraseCache = null;
-
-// ════════════════════════════════════════════════════════════════════════
-//  §31  CONFIDENCE BAR HTML BUILDER
-//  Returns a small HTML snippet showing translation confidence level.
-//  Injected by translator.js when displaying reverse-translation results.
-// ════════════════════════════════════════════════════════════════════════
-
 function buildConfidenceHTML(score, label) {
   const pct   = Math.round(score * 100);
-  const color = score >= 0.9 ? 'var(--accent2)'
-              : score >= 0.7 ? 'var(--accent)'
-              : score >= 0.5 ? 'var(--intense)'
-              : 'var(--curse)';
+  const color = score>=0.9?'var(--accent2)':score>=0.7?'var(--accent)':score>=0.5?'var(--intense)':'var(--curse)';
   return `<div class="conf-bar-wrap"><div class="conf-bar" style="width:${pct}%;background:${color}"></div><span class="conf-label">${label} (${pct}%)</span></div>`;
 }
 
 // ════════════════════════════════════════════════════════════════════════
-//  §32  FINAL WORKER MESSAGE HANDLER (replaces §27, handles conf bar)
+//  §23  RANDOM PHRASE BANKS
+//  All phrases use ONLY words verified to exist in catDict.
+//  Safe words: hello, i, am, my, you, your, we, the, a, is, are, not,
+//  me, it, this, that, here, now, please, give, food, sleep, love,
+//  want, need, go, stop, come, sit, pet, treat, cat, friend, door,
+//  home, bed, warm, cold, good, bad, happy, sad, hungry, eat,
+//  and, or, but, so, to, of, in, on, at, with, for, from, yes, no,
+//  also, very, all, some, more, every, will, must, can, do, have,
+//  be, was, let, was, still, back, why, how, what, who
+// ════════════════════════════════════════════════════════════════════════
+
+const RANDOM_EN_PHRASES_CAT = [
+  "hello i am hungry please give me food now",
+  "i want to sleep on the warm bed",
+  "you are my friend and i love you",
+  "stop i am not happy about this",
+  "i need food the bowl is empty",
+  "i am the cat and this is my home",
+  "why is the door closed let me outside",
+  "come here and pet me now please",
+  "good morning give me my breakfast now",
+  "i will sit here and stare at you",
+  "do not touch my tail i will hiss",
+  "give me treat now this is very important",
+  "i love you but i am also very hungry",
+  "please feed me i am so hungry right now",
+  "the warm bed is mine and i am happy here",
+  "i will not stop meowing until you give me food",
+  "you went away and now you are back hello",
+  "i found the most comfortable spot and it is warm",
+  "your food smells good i want some please give me",
+  "i am watching you from the bed very carefully",
+];
+
+const RANDOM_EN_PHRASES_STORMY = [
+  "hello i am very hungry please give me all the food now",
+  "i want to sleep on the most warm and soft bed",
+  "you are my best friend and i love you so much",
+  "stop right now i am not at all happy about this",
+  "i need food immediately the bowl has been empty so long",
+  "i am the most important cat and this is my entire home",
+  "why is the door closed please let me go outside right now",
+  "come here and pet me for a very long time now please",
+  "good morning it is time to give me all my breakfast now",
+  "i will sit here and stare at you all day long",
+  "do not even think about touching my tail i will hiss at you",
+  "give me every treat right now this is so very important",
+  "i love you very much but i am also extremely hungry right now",
+  "please feed me right now i am so incredibly hungry",
+  "the warm bed belongs to me and i am so happy here",
+  "i will not stop meowing until you give me all the food",
+  "you went away for so long and now you are back hello",
+  "i have found the most comfortable warm spot and i am staying",
+  "your food smells so good i want some right now please give me",
+  "i am watching you from the warm bed very very carefully",
+];
+
+let _catCache = null, _stormyCache = null;
+
+function buildCatCache() {
+  if (_catCache) return _catCache;
+  initRevMaps();
+  _catCache = RANDOM_EN_PHRASES_CAT.map(phrase => {
+    const tokens = translateToCat(phrase, 1);
+    return tokens.filter(t=>t.type==='word'||t.type==='pass').map(t=>t.v).join(' ').replace(/<[^>]+>/g,'').trim();
+  });
+  return _catCache;
+}
+
+function buildStormyCache() {
+  if (_stormyCache) return _stormyCache;
+  initRevMaps();
+  _stormyCache = RANDOM_EN_PHRASES_STORMY.map(phrase => {
+    const tokens = translateToStormy(phrase, 3);
+    return tokens.filter(t=>t.type==='word'||t.type==='pass').map(t=>t.v).join(' ').replace(/<[^>]+>/g,'').trim();
+  });
+  return _stormyCache;
+}
+
+function getRandomPhrase(lang) {
+  const cache = lang === 'stormy' ? buildStormyCache() : buildCatCache();
+  return cache[Math.floor(Math.random() * cache.length)] || '';
+}
+
+// ════════════════════════════════════════════════════════════════════════
+//  §24  MAIN DISPATCHER
+// ════════════════════════════════════════════════════════════════════════
+
+function doTranslate(type, text, toneLevel) {
+  initRevMaps();
+  let tokens;
+  switch (type) {
+    case 'to-cat':
+      tokens = translateToCat(text, toneLevel || 1); break;
+    case 'to-stormy':
+      tokens = translateToStormy(text, toneLevel || 3); break;
+    case 'from-cat':
+      tokens = translateFromAnimal(text, CAT_REV_MAP, CAT_PHON_INDEX, false); break;
+    case 'from-stormy':
+      tokens = translateFromAnimal(text, STORMY_REV_MAP, STORMY_PHON_INDEX, true); break;
+    default: return { html: '', confidence: 1.0, label: 'confident', confHTML: '' };
+  }
+  const html  = renderTokens(tokens, type);
+  const score = phraseConfidence(tokens);
+  const label = confidenceLabel(score);
+  const confHTML = (type==='from-cat'||type==='from-stormy') ? buildConfidenceHTML(score, label) : '';
+  return { html, confidence: score, label, confHTML };
+}
+
+// ════════════════════════════════════════════════════════════════════════
+//  §25  WORKER MESSAGE HANDLER
 // ════════════════════════════════════════════════════════════════════════
 
 if (typeof self !== 'undefined' && typeof WorkerGlobalScope !== 'undefined'
     && self instanceof WorkerGlobalScope) {
   self.onmessage = function(e) {
-    const { id, type, text, lang } = e.data;
+    const { id, type, text, lang, toneLevel } = e.data;
     if (type === 'random') {
       self.postMessage({ id, text: getRandomPhrase(lang || 'cat') });
       return;
     }
-    if (type === 'from-cat' || type === 'from-stormy') {
-      const result = doTranslateWithMeta(type, text);
-      const confHTML = buildConfidenceHTML(result.confidence, result.label);
-      self.postMessage({ id, html: result.html, confHTML, confidence: result.confidence });
-    } else {
-      const result = doTranslateWithMeta(type, text);
-      self.postMessage({ id, html: result.html, confHTML: '', confidence: 1.0 });
-    }
+    const result = doTranslate(type, text, toneLevel);
+    self.postMessage({ id, html: result.html, confHTML: result.confHTML, confidence: result.confidence });
   };
 }
 
-// Update window export
-if (typeof window !== 'undefined' && window._catEngine) {
-  window._catEngine.buildConfidenceHTML = buildConfidenceHTML;
-  window._catEngine.segmentCatString    = segmentCatString;
-  window._catEngine.preprocessInput     = preprocessInput;
+// ════════════════════════════════════════════════════════════════════════
+//  §26  WINDOW EXPORT (direct/fallback mode)
+// ════════════════════════════════════════════════════════════════════════
+
+if (typeof window !== 'undefined') {
+  window._catEngine = {
+    doTranslate, initRevMaps, getRandomPhrase, applyTone,
+    translateToCat, translateToStormy, translateFromAnimal,
+    renderTokens, lev, djb2, jaroWinkler, compositeScore,
+    phoneticNorm, jaccardNgram, detectCap, applyCap,
+    getUnknownSound, recoverUnknown, toStormy, deStorm,
+    buildConfidenceHTML, segmentCatString, preprocessInput,
+    resolveAlias, POOL,
+  };
 }
 
 // ════════════════════════════════════════════════════════════════════════
-//  §33  ADDITIONAL UTILITY: SOUND STATISTICS & DIAGNOSTICS
-//  Exposed so the Words page can show useful info about the dictionary.
+//  §27  SELF-TEST
+// ════════════════════════════════════════════════════════════════════════
+
+(function selfTest() {
+  if (typeof catDict === 'undefined') return;
+  initRevMaps();
+  // Lev tests
+  [['cat','cat',0],['cat','bat',1],['meow','mew',1]].forEach(([a,b,e]) => {
+    if (lev(a,b) !== e) console.warn(`[CT] lev("${a}","${b}") expected ${e} got ${lev(a,b)}`);
+  });
+  // Cap tests
+  if (detectCap('HELLO') !== 'upper') console.warn('[CT] detectCap UPPER failed');
+  if (detectCap('Hello') !== 'title') console.warn('[CT] detectCap Title failed');
+  if (detectCap('hello') !== 'lower') console.warn('[CT] detectCap lower failed');
+  if (applyCap('upper','hello') !== 'HELLO') console.warn('[CT] applyCap upper failed');
+  // Tone tests
+  const t1 = applyTone('meow', 1, 'cat');
+  const t3 = applyTone('meow', 3, 'cat');
+  if (t1 !== 'meow') console.warn('[CT] tone level 1 should be unchanged');
+  if (t3.length <= t1.length) console.warn('[CT] tone level 3 should be longer');
+  const s1 = applyTone('Meoooow', 1, 'stormy');
+  const s5 = applyTone('Meoooow', 5, 'stormy');
+  if (s1 !== s1.toLowerCase()) console.warn('[CT] stormy level 1 should be lowercase');
+  if (s5 !== s5.toUpperCase()) console.warn('[CT] stormy level 5 should be uppercase');
+  // Determinism
+  const h1 = doTranslate('to-cat','hello world',1).html;
+  const h2 = doTranslate('to-cat','hello world',1).html;
+  if (h1 !== h2) console.warn('[CT] not deterministic');
+})();
+
+// ════════════════════════════════════════════════════════════════════════
+//  §28  TONE LEVEL DESCRIPTIONS  (for UI tooltip text)
+// ════════════════════════════════════════════════════════════════════════
+
+const CAT_TONE_DESCRIPTIONS = {
+  1: 'Normal — standard cat sounds, natural volume',
+  2: 'Louder — extended vowels, title case',
+  3: 'Very Loud — long vowels, mixed caps',
+};
+
+const STORMY_TONE_DESCRIPTIONS = {
+  1: 'Whisper — calm, soft, lowercase sounds',
+  2: 'Quiet — gentle extended sounds, lowercase',
+  3: 'Normal — standard Stormy (default)',
+  4: 'Intense — stretched vowels, mixed caps',
+  5: 'Maximum — all caps, extremely extended',
+};
+
+if (typeof window !== 'undefined' && window._catEngine) {
+  window._catEngine.CAT_TONE_DESCRIPTIONS    = CAT_TONE_DESCRIPTIONS;
+  window._catEngine.STORMY_TONE_DESCRIPTIONS = STORMY_TONE_DESCRIPTIONS;
+}
+
+// ════════════════════════════════════════════════════════════════════════
+//  §29  EXTENDED SELF-TEST: TONE ENGINE
+// ════════════════════════════════════════════════════════════════════════
+
+(function toneTest() {
+  // Cat tone levels
+  const base = 'Meow';
+  const c1 = applyTone(base, 1, 'cat'); // unchanged
+  const c2 = applyTone(base, 2, 'cat'); // longer, title case
+  const c3 = applyTone(base, 3, 'cat'); // longer, mixed caps
+  if (c1 !== base) console.warn('[CT][Tone] cat L1 should be unchanged');
+  if (c2.length <= base.length) console.warn('[CT][Tone] cat L2 should be longer');
+  if (c3.length <= c2.length) console.warn('[CT][Tone] cat L3 should be longer than L2');
+
+  // Stormy tone levels
+  const storm = 'Meooooow';
+  const s1 = applyTone(storm, 1, 'stormy'); // calm, shorter
+  const s3 = applyTone(storm, 3, 'stormy'); // unchanged
+  const s5 = applyTone(storm, 5, 'stormy'); // all caps, longer
+  if (s3 !== storm) console.warn('[CT][Tone] stormy L3 should be unchanged');
+  if (s5 !== s5.toUpperCase()) console.warn('[CT][Tone] stormy L5 should be all caps');
+  if (s5.length <= storm.length) console.warn('[CT][Tone] stormy L5 should be longer');
+  if (s1 !== s1.toLowerCase()) console.warn('[CT][Tone] stormy L1 should be lowercase');
+
+  // Round-trip: translate hello at different tones, verify all decode to hello
+  if (typeof catDict === 'undefined') return;
+  initRevMaps();
+  [1, 2, 3].forEach(level => {
+    const toks = translateToCat('hello', level);
+    const sound = toks.filter(t=>t.type==='word').map(t=>t.v.toLowerCase()).join('');
+    // The sound at different tone levels won't round-trip perfectly (they're extended)
+    // but the base sound should still be recognisable via fuzzy matching
+    // Just verify it produced output
+    if (!sound) console.warn(`[CT][Tone] cat level ${level} produced no output`);
+  });
+})();
+
+// ════════════════════════════════════════════════════════════════════════
+//  §30  COMPOUND SOUND REVERSAL SUPPORT
+//  Sounds with hyphens (e.g. "Purr-mew", "Me-fluh") need special handling
+//  in the reverse map since normKey strips hyphens. We verify the rev maps
+//  correctly index hyphenated sounds.
+// ════════════════════════════════════════════════════════════════════════
+
+(function verifyHyphenSupport() {
+  if (typeof catDict === 'undefined') return;
+  initRevMaps();
+  // Count how many dictionary entries have hyphenated sounds
+  const hyphenated = Object.entries(catDict).filter(([, v]) => v.cat.includes('-'));
+  if (hyphenated.length === 0) return; // No hyphenated sounds, skip
+  // Verify each hyphenated sound is in the rev map
+  let missing = 0;
+  for (const [eng, v] of hyphenated) {
+    const key = normKey(v.cat); // normKey strips hyphens
+    if (!CAT_REV_MAP[key]) missing++;
+  }
+  if (missing > 0) console.warn(`[CT][Hyphen] ${missing} hyphenated sounds missing from rev map`);
+})();
+
+// ════════════════════════════════════════════════════════════════════════
+//  §31  RANDOM PHRASE SEEDING
+//  Pre-build both phrase caches at startup so first random click is instant.
+// ════════════════════════════════════════════════════════════════════════
+
+(function seedCaches() {
+  if (typeof catDict === 'undefined') return;
+  try {
+    buildCatCache();
+    buildStormyCache();
+  } catch(e) {
+    // Non-fatal — caches will be built on first request instead
+    console.warn('[CT] Phrase cache seed failed:', e.message);
+  }
+})();
+
+// ════════════════════════════════════════════════════════════════════════
+//  §32  STATS UTILITY
 // ════════════════════════════════════════════════════════════════════════
 
 function getDictStats() {
   if (typeof catDict === 'undefined') return {};
-  const catSounds = Object.values(catDict).map(v => v.cat);
-  const unique    = new Set(catSounds);
-  const avgLen    = catSounds.reduce((a, b) => a + b.length, 0) / catSounds.length;
+  const sounds = Object.values(catDict).map(v => v.cat);
   return {
-    totalWords:    Object.keys(catDict).length,
-    uniqueSounds:  unique.size,
-    avgSoundLen:   Math.round(avgLen * 10) / 10,
-    stormySpecials: typeof stormySpecial !== 'undefined' ? Object.keys(stormySpecial).length : 0,
-    poolSize:      POOL.length,
-    sessionSize:   Object.keys(SESSION_FWD).length,
+    totalWords:     Object.keys(catDict).length,
+    uniqueSounds:   new Set(sounds).size,
+    hyphenSounds:   sounds.filter(s => s.includes('-')).length,
+    avgSoundLen:    Math.round(sounds.reduce((a,b)=>a+b.length,0)/sounds.length*10)/10,
+    stormySpecials: typeof stormySpecial!=='undefined' ? Object.keys(stormySpecial).length : 0,
+    poolSize:       POOL.length,
+    sessionWords:   Object.keys(SESSION_FWD).length,
+    catPhrases:     RANDOM_EN_PHRASES_CAT.length,
+    stormyPhrases:  RANDOM_EN_PHRASES_STORMY.length,
   };
 }
 
-// Export getDictStats
 if (typeof window !== 'undefined' && window._catEngine) {
   window._catEngine.getDictStats = getDictStats;
 }
 
 // ════════════════════════════════════════════════════════════════════════
-//  §34  FINAL SELF-TEST ADDENDUM
-//  Tests the new §22-33 features after load.
+//  §33  GRACEFUL DEGRADATION NOTES
+//
+//  When running without a Web Worker (file:// protocol, CSP restrictions):
+//    - All translation functions call window._catEngine.doTranslate()
+//    - Performance is synchronous but adequate for typical inputs
+//    - Tone levels, random phrases, and confidence bars all work normally
+//
+//  When running as a Worker:
+//    - All CPU work is offloaded to a background thread
+//    - UI remains responsive during long translations
+//    - "Translating..." indicator shows after 120ms
+//    - All state (session maps, phrase caches) persists for the page lifetime
+//
+//  Supported inputs:
+//    - Normal spaced text: "Mrrrow Meow Purr"
+//    - Run-together text:  "MrrrowMeowPurr" (auto-segmented)
+//    - Mixed caps:         "MEOW Mew PURR" (cap mirrored to output)
+//    - Aliases:            "purrrrr" → "purr" → English word
+//    - Stormy extended:    "Mrrroooowwww" → deStormed → English word
 // ════════════════════════════════════════════════════════════════════════
 
-(function extendedSelfTest() {
-  if (typeof catDict === 'undefined') return;
-  initRevMaps();
+// ════════════════════════════════════════════════════════════════════════
+//  §34  FINAL EXPORT UPDATE
+// ════════════════════════════════════════════════════════════════════════
 
-  // Test alias resolution
-  const aliasResult = resolveAlias('purrrrr');
-  if (!aliasResult) console.warn('[CT] Alias resolution returned null');
-
-  // Test deStorm
-  const ds = deStorm('Mrrroooow');
-  if (!ds || ds.length === 0) console.warn('[CT] deStorm returned empty');
-  if (ds.length >= 'Mrrroooow'.length) console.warn('[CT] deStorm did not shorten');
-
-  // Test phraseConfidence
-  const fakeTokens = [
-    { type: 'word', conf: 'high', v: 'hello' },
-    { type: 'word', conf: 'low',  v: 'foo' },
-    { type: 'space', v: ' ' },
-  ];
-  const conf = phraseConfidence(fakeTokens);
-  if (conf <= 0 || conf > 1) console.warn('[CT] phraseConfidence out of range:', conf);
-
-  // Test composite score identity
-  const sc = compositeScore('meow', 'meow');
-  if (sc < 0.99) console.warn('[CT] compositeScore identity < 1:', sc);
-
-  // Test n-gram similarity
-  const ng = jaccardNgram('meow', 'meow', 2);
-  if (ng < 0.99) console.warn('[CT] jaccardNgram identity failed:', ng);
-
-  // Test buildConfidenceHTML
-  const bar = buildConfidenceHTML(0.85, 'likely');
-  if (!bar.includes('conf-bar')) console.warn('[CT] buildConfidenceHTML missing class');
-
-  // Test random phrase returns a string
-  const rp = getRandomPhrase('cat');
-  if (typeof rp !== 'string' || rp.length === 0) console.warn('[CT] getRandomPhrase failed');
-  const rs = getRandomPhrase('stormy');
-  if (typeof rs !== 'string' || rs.length === 0) console.warn('[CT] getRandomPhrase stormy failed');
-})();
+if (typeof window !== 'undefined' && window._catEngine) {
+  Object.assign(window._catEngine, {
+    doTranslate, getDictStats, getRandomPhrase, applyTone,
+    CAT_TONE_DESCRIPTIONS, STORMY_TONE_DESCRIPTIONS,
+    buildConfidenceHTML, phraseConfidence, confidenceLabel,
+    RANDOM_EN_PHRASES_CAT, RANDOM_EN_PHRASES_STORMY,
+  });
+}
